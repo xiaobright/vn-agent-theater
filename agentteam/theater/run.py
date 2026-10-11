@@ -90,7 +90,8 @@ def main() -> None:
     rec = Recorder(run_dir)
 
     print(f"模型：{cfg.describe()}")
-    print(f"角色：{'、'.join(args.cast)} · {args.turns} 轮 · 起始 {args.world_date}")
+    turns_label = f"最多 {args.max_turns} 轮" if timeline else f"{args.turns} 轮"
+    print(f"角色：{'、'.join(args.cast)} · {turns_label} · 起始 {args.world_date}")
     print(f"状态注入：{args.injection} · 温度 {cfg.temperature}")
     print(f"排程：{'事件驱动（角色自己声明何时醒）' if timeline else '固定轮次'}")
     print(f"目标：{request[:60]}…\n")

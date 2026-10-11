@@ -54,6 +54,7 @@ class Recorder:
             seq = self.seq
             for k in ("prompt_tokens", "completion_tokens"):
                 self.usage_total[k] += (usage or {}).get(k, 0) or 0
+            self.usage_total["cached_tokens"] += cached_tokens(usage)
         safe_role = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", role)
         tag = f"{seq:02d}_{safe_role}"
         payload = {

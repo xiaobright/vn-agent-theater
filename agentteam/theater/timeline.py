@@ -127,9 +127,13 @@ class Timeline:
         for wake in self.pending:
             if wake.actor not in alive:
                 continue
-            when = self.fire_time(wake, last_action)
-            if when is None or when < clock:
+            raw = self.fire_time(wake, last_action)
+            if raw is None:
                 continue
+            # 迟到的唤醒**立刻补上，不能丢**。时间可能被"同一时刻连环反应"的守卫推过
+            # 某个人的声明时刻；那时他的时机已经过去，但意图不该消失——丢掉它会让
+            # 这个人从此再也醒不过来（实测：主角动过一次就被首领一直压着）。
+            when = max(raw, clock)
             if best is None or (when, wake.id) < (best[1], best[0].id):
                 best = (wake, when)
         if best is not None:

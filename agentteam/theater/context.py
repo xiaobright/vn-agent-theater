@@ -20,10 +20,37 @@ from .world import World
 
 # 每轮结尾注入的状态块。改这里就能改角色"开界面时能看到什么"的措辞。
 STATE_TEMPLATE = """【状态注入 · 第{turn}轮 · 世界日期：{world_date}】
-
+{situation}
 你的状态：{vitality}
 你的三槽（只有你自己看得到，也只看得到自己的）：
 {slots}"""
+
+
+def _situation(world: World, actor: str) -> str:
+    """数值层的现状：你在哪、能去哪、这里有什么、谁在。没有地点表就返回空。
+
+    这一段是必须的——不写它，角色根本不知道自己在哪，【动作】就没法用。
+    实测的教训：模型会直接说「我连自己在哪都说不清」，然后一轮轮原地不动。
+    """
+    from .physics import condition_text
+    if not world.scene.has_locations():
+        return ""
+    state = world.state()
+    here = world.scene.locations.get(state.positions.get(actor, ""))
+    if here is None:
+        return ""
+    neighbors = "、".join(world.scene.locations[n].name for n in here.neighbors) or "（无处可去）"
+    items = [i for i, at in state.items.items() if at == here.name]
+    near = state.nearby(actor)
+    lines = [
+        f"你在：{here.name}（{here.text()}）",
+        f"能去：{neighbors}　　← 只能写这些地名",
+        f"这里的东西：{'、'.join(items) if items else '（没有）'}",
+        f"同地点的人：{'、'.join(near) if near else '（没有别人）'}",
+        f"你的伤况：{condition_text(state.conditions.get(actor, 'ok'))}"
+        f"　　手里：{'、'.join(state.inventory.get(actor, ())) or '（空手）'}",
+    ]
+    return "\n" + "\n".join(lines)
 
 
 def state_block(world: World, actor: str) -> str:
@@ -37,6 +64,7 @@ def state_block(world: World, actor: str) -> str:
     vitality = "存活，可操作。" if world.can_act(actor) else (
         "已死亡。" if not world.alive(actor) else "存活，但世界正被他人暂停。")
     return STATE_TEMPLATE.format(turn=world.live[1], world_date=world.world_date,
+                                 situation=_situation(world, actor),
                                  vitality=vitality, slots="\n".join(lines))
 
 

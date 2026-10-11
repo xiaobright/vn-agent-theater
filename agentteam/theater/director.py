@@ -272,19 +272,23 @@ def run_scene(
             if not alive:
                 emit("end", {"reason": "没有活着的角色了"})
                 break
-            wake, when, reason = timeline.next_wake(world.clock, alive, last_action)
+            # 同一时刻连环反应太多（互相观察）时，先把"现在"往后推，再重新挑。
+            # 注意是**抬高时间下限后重挑**，而不是把已选中的那个往后挪——后者会跳过
+            # 别人在同一段时间里声明的唤醒。
+            forced = same_clock > len(alive)
+            floor = world.clock + timeline.default_step if forced else world.clock
+            if forced:
+                same_clock = 0
+            wake, when, reason = timeline.next_wake(floor, alive, last_action)
             if wake is None:
                 break
             if when > timeline.horizon():
                 emit("end", {"reason": f"到了场景的最晚时刻（{timeline.label(timeline.horizon())}）"})
                 break
-            same_clock = same_clock + 1 if when == world.clock else 0
-            if same_clock > len(alive):
-                # 同一时刻连环反应太多（互相观察），强制推进时间，别在原地打转。
-                when = world.clock + timeline.default_step
-                reason = {"type": "forced", "actor": wake.actor,
+            if forced:
+                reason = {**reason, "type": "forced",
                           "note": "同一时刻连环反应过多，强制推进时间"}
-                same_clock = 0
+            same_clock = same_clock + 1 if when == world.clock else 0
             world.advance(timeline.label(when), clock=when)
             played += 1
             timeline.consumed(wake.id)

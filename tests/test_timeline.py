@@ -15,6 +15,7 @@ import unittest
 from agentteam.config import load_config
 from agentteam.recorder import Recorder
 from agentteam.theater import physics
+from agentteam.theater.context import state_block
 from agentteam.theater.director import run_scene
 from agentteam.theater.physics import Scene
 from agentteam.theater.timeline import Timeline
@@ -77,6 +78,19 @@ class TimelineTests(unittest.TestCase):
         self.assertEqual(reason["type"], "fallback")
         self.assertEqual(when, 160)
         self.assertEqual(wake.actor, "首领")     # 最久没动的那个
+
+    def test_overdue_wakes_are_not_dropped(self):
+        """时间被"连环反应"守卫推过某个人的声明时刻时，他的意图不能消失。
+
+        这是实测出来的 bug：主角声明 T+30 再动，首领一直声明"立刻"，守卫把时间推到
+        T+60 之后，主角那个 T+30 的唤醒被 `when < clock` 过滤掉，从此再也醒不过来。
+        """
+        tl = Timeline(schedule=[(0, "夜"), (600, "次日")], default_step=60)
+        tl.declare("主角", after_minutes=30, now=0)
+        tl.declare("首领", kind="immediate", at=0, now=0)
+        wake, when, _ = tl.next_wake(60, ["主角", "首领"], {"首领": 60})
+        self.assertEqual(wake.actor, "主角")
+        self.assertEqual(when, 60)          # 补在当前时刻，而不是被丢掉
 
     def test_label_and_horizon(self):
         tl = Timeline(schedule=[(0, "第三天·夜"), (240, "第三天·深夜"), (600, "第四天")])
@@ -210,6 +224,35 @@ class NumericDerivationTests(unittest.TestCase):
         w.load("首领", 1)              # 别人可以把他恢复
         self.assertTrue(w.alive("主角"))
 
+    def test_state_block_tells_the_actor_where_it_is(self):
+        """状态注入必须带上位置/能去哪/这里有什么/谁在——否则【动作】根本没法用。
+
+        实测的教训：模型会直接说「我连自己在哪都说不清」，然后一轮轮原地不动。
+        """
+        w = numeric_world()
+        block = state_block(w, "主角")
+        self.assertIn("你在：住处", block)
+        self.assertIn("巷口", block)              # 能去的地方
+        self.assertIn("止血药" if False else "这里的东西", block)
+        self.assertIn("同地点的人", block)
+        self.assertIn("手里", block)
+
+    def test_state_block_shows_nearby_after_moving_together(self):
+        w = numeric_world()
+        w.advance("第三天·夜", clock=0)
+        w.action_event("主角", physics.resolve(w.scene, w.state(), {"op": "move", "dest": "巷口"},
+                                               actor="主角", clock=0, turn=1))
+        w.advance("第三天·夜", clock=1)
+        w.action_event("首领", physics.resolve(w.scene, w.state(), {"op": "move", "dest": "巷口"},
+                                               actor="首领", clock=1, turn=2))
+        self.assertIn("同地点的人：首领", state_block(w, "主角"))
+        self.assertIn("同地点的人：主角", state_block(w, "首领"))
+
+    def test_state_block_stays_silent_without_a_scene(self):
+        """没有地点表的老场景不该凭空长出这一段。"""
+        w = World("第一天", ["主角", "首领"])
+        self.assertNotIn("你在：", state_block(w, "主角"))
+
     def test_restrained_cannot_act_but_is_alive(self):
         w = numeric_world()
         w.advance("第三天·夜", clock=0)
@@ -261,6 +304,19 @@ class TimelineDirectorTests(unittest.TestCase):
                                rules="（测试用规则）", bibles={}, timeline=timeline,
                                observe=False, max_turns=2)
         self.assertGreater(result["played"], 0)
+
+    def test_no_actor_gets_starved(self):
+        """整场跑下来，两边都得真的动过手——一个人被另一个人一直压着就是 bug。"""
+        world = numeric_world()
+        timeline = Timeline(schedule=[(0, "第三天·夜"), (600, "第四天")], default_step=60)
+        with tempfile.TemporaryDirectory() as tmp:
+            rec = Recorder(pathlib.Path(tmp))
+            result = run_scene(load_config(mock=True), rec, world, request="大乱斗",
+                               rules="（测试用规则）", bibles={}, timeline=timeline,
+                               observe=False, max_turns=8)
+        actors = [e["actor"] for e in result["belief"]["objective"] if e.get("actor")]
+        self.assertGreaterEqual(actors.count("主角"), 2, f"主角只动了 {actors.count('主角')} 次")
+        self.assertGreaterEqual(actors.count("首领"), 2, f"首领只动了 {actors.count('首领')} 次")
 
     def test_horizon_stops_the_scene(self):
         world = numeric_world()

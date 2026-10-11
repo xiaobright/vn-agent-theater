@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import asyncio
 import os
+import pathlib
+import tempfile
 import threading
 import time
 import unittest
@@ -16,6 +18,7 @@ from unittest.mock import patch
 from openai import APIConnectionError, APITimeoutError
 
 from agentteam.config import Config, for_role, load_config
+from agentteam.recorder import Recorder, cached_tokens
 from agentteam import llm
 
 
@@ -330,6 +333,29 @@ class LLMTests(unittest.TestCase):
         self.assertEqual(len(results), 5)
         self.assertEqual(llm.scheduler_snapshot()["peak_active"], 1)
         self.assert_idle()
+
+
+class RecorderTests(unittest.TestCase):
+    """缓存命中要真的累加进去——漏了这一行，CLI 会一直报 0%，把真实命中率藏起来。"""
+
+    def test_cached_tokens_are_accumulated_from_both_shapes(self):
+        # Windows 上临时目录清理偶尔会被索引/杀软占住句柄，报 WinError 145；
+        # 那是环境问题，不该让测试变红。
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            rec = Recorder(pathlib.Path(tmp))
+            rec.record(role="a", model="m", messages=[], response="x", elapsed=0.1,
+                       usage={"prompt_tokens": 100, "completion_tokens": 5,
+                              "prompt_tokens_details": {"cached_tokens": 64}})
+            rec.record(role="b", model="m", messages=[], response="x", elapsed=0.1,
+                       usage={"prompt_tokens": 50, "completion_tokens": 2, "cached_tokens": 32})
+            self.assertEqual(rec.usage_total["cached_tokens"], 96)
+            self.assertEqual(rec.usage_total["prompt_tokens"], 150)
+
+    def test_missing_or_malformed_usage_counts_as_zero(self):
+        self.assertEqual(cached_tokens(None), 0)
+        self.assertEqual(cached_tokens({}), 0)
+        self.assertEqual(cached_tokens({"cached_tokens": None}), 0)
+        self.assertEqual(cached_tokens({"cached_tokens": True}), 0)   # 布尔不是数字
 
 
 class ConfigTests(unittest.TestCase):
