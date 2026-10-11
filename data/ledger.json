@@ -1,0 +1,92 @@
+{
+  "current_version": "v2",
+  "versions": [
+    {
+      "id": "v1",
+      "world_date": "第一天·黄昏",
+      "parent": null,
+      "transition": "normal",
+      "actor": null,
+      "label": "起点：主角确认自己能存取档",
+      "events": [
+        "主角第一次确认自己能存取档，每人固定三槽"
+      ]
+    },
+    {
+      "id": "v2",
+      "world_date": "第三天·夜",
+      "parent": "v1",
+      "transition": "normal",
+      "actor": null,
+      "label": "码头对峙",
+      "events": [
+        "主角与首领在码头短暂对峙，首领说出一件只有未来才会发生的事",
+        "主角当时没能当场拆穿，先回了住处"
+      ]
+    },
+    {
+      "id": "v3",
+      "world_date": "第一天·黄昏",
+      "parent": "v1",
+      "transition": "character_load",
+      "actor": "主角",
+      "label": "被放弃的分支：读回第一天重走",
+      "events": [
+        "主角从第三天读回第一天的快照，另走一条路，避开了一次埋伏",
+        "该分支后来被放弃——里面刚建立的信任也一并没了"
+      ]
+    }
+  ],
+  "characters": {
+    "主角": {
+      "alive": true,
+      "can_act": true,
+      "knows": [
+        "自己能存取档，每人固定三槽",
+        "首领在码头说过一件「还没发生」的事",
+        "打开存取档界面时世界会停住"
+      ],
+      "believes": [
+        "自己可能是唯一能读档的人",
+        "首领的预知大概是巧合或情报泄露"
+      ],
+      "misjudges": [
+        "以为首领没有读档能力"
+      ],
+      "relations": { "首领": "警惕" },
+      "mechanism_awareness": "以为自己唯一",
+      "goal": "弄清首领为什么能提前知道未来",
+      "slots": [
+        { "slot": 1, "version": "v1", "note": "进城前存的" },
+        { "slot": 2, "version": null, "note": null },
+        { "slot": 3, "version": null, "note": null }
+      ]
+    },
+    "首领": {
+      "alive": true,
+      "can_act": true,
+      "knows": [
+        "自己能存取档",
+        "主角在码头的反应有点不对，像是提前防了一手"
+      ],
+      "believes": [
+        "主角可能也是读档者，但证据不足",
+        "主角的异常更可能是有人泄密"
+      ],
+      "misjudges": [],
+      "relations": { "主角": "试探中" },
+      "mechanism_awareness": "怀疑有别人也能读档",
+      "goal": "确认主角到底知道多少，同时保住自己的退路",
+      "slots": [
+        { "slot": 1, "version": "v2", "note": "对峙前" },
+        { "slot": 2, "version": null, "note": null },
+        { "slot": 3, "version": null, "note": null }
+      ]
+    }
+  },
+  "foreshadowing": [
+    { "id": "f1", "desc": "主角槽位里出现不记得存过、备注是自己字迹的档", "status": "未埋" },
+    { "id": "f2", "desc": "首领落空的预言", "status": "未埋" }
+  ],
+  "player_seen": []
+}
