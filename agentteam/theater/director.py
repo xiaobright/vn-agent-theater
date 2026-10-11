@@ -58,7 +58,7 @@ def render_prose(cfg: Config, rec: Recorder, world: World, request: str,
     card = (PROMPTS_DIR / "theater_writer.md").read_text(encoding="utf-8").strip()
     log = []
     for event in world.path_events():
-        if event.kind in {"state", "interface", "wake"}:
+        if event.is_personal_record():
             continue
         log.append({"turn": event.turn, "clock": event.clock, "world_date": event.world_date,
                     "kind": event.kind, "actor": event.actor, "public": event.public,

@@ -9,7 +9,7 @@ from agentteam.recorder import Recorder
 from agentteam.rules import load_rules
 from agentteam.theater.actor import actor_prompt, apply_interface, belief_matrix, parse_reply
 from agentteam.theater.context import build_messages, state_block
-from agentteam.theater.director import run_scene
+from agentteam.theater.director import render_prose, run_scene
 from agentteam.theater.physics import ActionError, Scene, resolve
 from agentteam.theater.timeline import Timeline
 from agentteam.theater.world import TheaterError, World
@@ -180,6 +180,41 @@ class PhysicsRegressionTests(unittest.TestCase):
             resolve(scene, w.state(), take, actor="甲", clock=0, turn=0)
         w.load("乙", 1)
         self.assertTrue(resolve(scene, w.state(), take, actor="乙", clock=0, turn=0)["ok"])
+
+
+class WriterLogTests(unittest.TestCase):
+    """写手只渲染世界的客观经过；私有记录不能变成旁白。"""
+
+    def render(self, world):
+        with TemporaryDirectory(ignore_cleanup_errors=True) as tmp:
+            rec = Recorder(Path(tmp) / "run")
+            text = render_prose(config(), rec, world, "本场目标")
+            payloads = "".join(p.read_text(encoding="utf-8")
+                               for p in sorted((Path(tmp) / "run").glob("*.json")))
+        return text, payloads
+
+    def test_private_beliefs_do_not_reach_the_writer(self):
+        """初始信念以 note 事件进场，它只属于本人，不能出现在正文或写手输入里。"""
+        w = World("起点", ["甲", "乙"])
+        w.advance("起点")
+        w.append("note", actor="甲", to="甲", public="甲的看法：怕某个版本的自己消失")
+        w.append("note", actor="乙", to="乙", public="乙的看法：不被存档的东西等于不存在")
+        w.append("turn", actor="甲", public="甲把灯熄了")
+        w.append("pause", actor="乙", public="（乙打开了存取档界面。世界停住了。）")
+        w.append("memory", actor="甲", public="（甲记得读档前发生的一切。）")
+        text, payloads = self.render(w)
+        for leaked in ("某个版本的自己", "不被存档的东西", "打开了存取档界面", "记得读档前"):
+            self.assertNotIn(leaked, text)
+            self.assertNotIn(leaked, payloads)
+        self.assertIn("甲把灯熄了", text)
+
+    def test_personal_record_classification(self):
+        w = World("起点", ["甲", "乙"])
+        w.advance("起点")
+        self.assertTrue(w.append("note", actor="甲", to="甲", public="私人留言").is_personal_record())
+        self.assertTrue(w.append("pause", actor="甲", public="开了界面").is_personal_record())
+        self.assertFalse(w.append("scene", public="灯灭了").is_personal_record())
+        self.assertFalse(w.append("turn", actor="甲", public="甲走了").is_personal_record())
 
 
 if __name__ == "__main__":

@@ -85,6 +85,15 @@ class Event:
             return f"{self.public}\n{self.private}"
         return self.public
 
+    def is_personal_record(self) -> bool:
+        """这条记录是否只属于某个人，而不是世界的客观经过。
+
+        指定收件人的留言，以及内心 / 界面 / 暂停 / 状态注入 / 唤醒 / 记忆覆盖层，
+        都只存在于当事人的上下文里。渲染正文只能依据客观经过，否则某个角色的
+        私有记忆会被写成旁白（初始信念就是以 note 事件进场的）。
+        """
+        return self.to is not None or self.kind in _PRIVATE_KINDS
+
 
 @dataclass
 class Branch:
