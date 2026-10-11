@@ -95,6 +95,8 @@ agentteam.rejudge 可复用新实验目录冻结的评审输入。agentteam.thea
 
 ~~~sh
 uv run python -m unittest discover -s tests -v
+# 页面状态回归检查（需要 Node.js 22+）
+node --test tests/web.test.cjs
 ~~~
 
 测试用临时目录及模型替身，无需密钥。CI 在 Windows 和 Linux 上运行，覆盖请求预算、取消、快照、记忆、物品、时间线和工作台持久化。

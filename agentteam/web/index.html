@@ -45,7 +45,7 @@
   button.primary{background:#1d4ed8;border-color:#2f5fd0;color:#fff}
   button.primary:disabled{background:#232c3a;border-color:var(--line);color:var(--dim2);cursor:default}
   .row{display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap}
-  .row>*{flex:1}
+  .row>*{flex:1 1 130px;min-width:0}
   .row .tight{flex:0 0 auto;width:auto}
   .chips{display:flex;gap:6px;flex-wrap:wrap;margin-top:4px}
   .chip{font-size:12px;padding:3px 9px;border-radius:999px;border:1px solid var(--line);
@@ -206,6 +206,26 @@
       </div>
       <div class="tight" style="width:auto"><label>&nbsp;</label>
         <button id="p-run" class="primary">开跑</button></div>
+      <div class="tight"><button id="p-cancel" disabled>取消运行</button></div>
+    </div>
+    <div id="p-error" role="alert" style="color:var(--bad)"></div>
+  </div>
+  <div class="card">
+    <h2>当前草稿</h2><div id="p-selected" class="mono dim"></div>
+    <div class="row" style="margin-top:8px">
+      <button id="p-edit" disabled>手工编辑</button>
+      <button id="p-recheck" disabled>重新检查</button>
+      <button id="p-adopt" disabled>采纳到正式账本</button>
+      <button id="p-next">新建下一场</button>
+    </div>
+    <div id="p-adoption" class="dim"></div>
+    <label for="p-feedback">定向修改意见</label>
+    <textarea id="p-feedback" placeholder="填写修改意见，再点击定向修改；重新检查不会使用这里的意见"></textarea>
+    <button id="p-revise" disabled>定向修改并检查</button>
+    <div id="p-editor" class="hidden">
+      <label for="p-edit-scene">正文</label><textarea id="p-edit-scene" rows="10"></textarea>
+      <label for="p-edit-proposal">状态提案（JSON）</label><textarea id="p-edit-proposal" class="mono" rows="8"></textarea>
+      <div class="row"><button id="p-save">另存为新草稿</button><button id="p-discard">放弃编辑</button></div>
     </div>
   </div>
   <div class="grid g3">
@@ -238,7 +258,8 @@ document.querySelectorAll(".tab").forEach((b) => b.onclick = () => {
   document.querySelectorAll(".tab").forEach((x) => x.classList.toggle("on", x === b));
   $("tab-theater").classList.toggle("hidden", tab !== "theater");
   $("tab-pipeline").classList.toggle("hidden", tab !== "pipeline");
-  if (tab === "pipeline") loadRuns();
+  renderActive();
+  tick();
 });
 const chip = (el, init) => { el.classList.toggle("on", init); el.onclick = () => el.classList.toggle("on"); return el; };
 
@@ -393,12 +414,6 @@ function renderWakes(wakes){
 }
 
 function renderTheater(s){
-  $("status").textContent = s.status || "idle";
-  $("status").className = "pill " + (s.status === "running" ? "run" : s.status === "done" ? "done" : s.status === "error" ? "err" : "");
-  $("provider").textContent = s.provider || "";
-  $("calls").textContent = s.calls ? `${s.calls} 次调用` : "";
-  if(s.error) $("t-observer").innerHTML = `<div style="color:var(--bad)">${esc(s.error)}</div>`;
-
   drawGraph(s.graph, s.state);
   renderNumeric(s.state);
   renderWakes(s.wakes);
@@ -422,6 +437,7 @@ function renderTheater(s){
     ${(r.divergences||[]).map((d) => `<div class="mono" style="margin:4px 0 0 8px;color:#f0b8ae">
       ${esc(d.who||"")} · ${esc(d.kind||"")}：${esc(d.detail||d.evidence||"")}</div>`).join("")}</div>`).join("")
     : (s.status === "running" ? '<div class="empty">等待第一轮结束…</div>' : '<div class="empty">还没有观察报告。</div>'));
+  if(s.error) $("t-observer").insertAdjacentHTML("afterbegin", `<div style="color:var(--bad)">${esc(s.error)}</div>`);
 
   const issues = s.issues || [];
   $("t-issues").innerHTML = `
@@ -438,7 +454,8 @@ function renderTheater(s){
 }
 
 /* ---------- 协作模式 ---------- */
-let pMock = true, pLoop = true, modes = [];
+let modes = [], selectedRunId = null, selectedRecord = null;
+let selectionSequence = 0, editing = false, actionBusy = false, followLive = true;
 function renderPipeline(s){
   $("p-stages").innerHTML = (s.stages || []).map((st) => {
     const c = st.status === "done" ? "var(--ok)" : st.status === "active" ? "var(--accent)" :
@@ -452,34 +469,95 @@ function renderPipeline(s){
     ${s.workflow_status ? `<div>状态：<span class="mono">${esc(s.workflow_status)}</span>
       ${s.revisions ? ` · 修订 ${s.revisions} 次` : ""}</div>` : ""}
     ${chk.status ? `<div>审查：<span class="mono">${esc(chk.status)}</span></div>` : ""}
+    ${s.error ? `<div style="color:var(--bad)">${esc(s.error)}</div>` : ""}
     ${(chk.issues||[]).map((i) => `<div class="mono" style="color:#f0b8ae">[${esc(i.kind)}] ${esc(i.message)}</div>`).join("")}
+    ${(chk.questions||[]).map((q) => `<div class="dim">待确认：${esc(typeof q === "string" ? q : JSON.stringify(q))}</div>`).join("")}
     <pre class="dim">${esc(s.review || "")}</pre>`;
   $("p-proposal").innerHTML = `<pre class="dim">${esc(JSON.stringify(s.proposal || {}, null, 2))}</pre>`;
   $("p-ledger").innerHTML = `<pre>${esc(JSON.stringify(s.ledger || {}, null, 2))}</pre>`;
+  $("p-selected").textContent = selectedRunId || "未选择草稿；开跑会使用当前账本创建新场景。";
+  $("p-adoption").textContent = selectedRecord?.adoption_error || "";
+  const busy = actionBusy || lastPipeline.status === "running";
+  const usable = !!selectedRecord && selectedRecord.status !== "running" && !busy && !editing;
+  $("p-run").disabled = busy || editing;
+  $("p-cancel").disabled = actionBusy || lastPipeline.status !== "running";
+  $("p-edit").disabled = !usable || !!selectedRecord?.adopted_at;
+  $("p-recheck").disabled = !usable || !selectedRecord.scene || !!selectedRecord.adopted_at;
+  $("p-revise").disabled = $("p-recheck").disabled;
+  $("p-adopt").disabled = !usable || !selectedRecord?.can_adopt;
+  $("p-next").disabled = busy || editing;
+  $("p-save").disabled = actionBusy;
+  $("p-discard").disabled = actionBusy;
+}
+async function api(url, method = "GET", body){
+  const r = await fetch(url, {method, ...(body === undefined ? {} : {
+    headers:{"Content-Type":"application/json"}, body:JSON.stringify(body)})});
+  const data = await r.json();
+  if(!r.ok || data.ok === false) throw new Error(data.error || JSON.stringify(data.detail || "请求失败"));
+  return data;
+}
+async function selectRun(id){
+  if(editing) return;
+  selectedRunId = id;
+  selectedRecord = null;
+  const seq = ++selectionSequence;
+  const record = await api(`/api/runs/${encodeURIComponent(id)}`);
+  if(seq !== selectionSequence || selectedRunId !== id) return;
+  selectedRecord = record;
+  renderActive();
 }
 async function loadRuns(){
-  const r = await (await fetch("/api/runs")).json();
-  $("p-runs").innerHTML = (r.runs || []).map((x) => `<div style="padding:4px 0;border-bottom:1px solid #1e2530">
+  const r = await api("/api/runs");
+  $("p-runs").innerHTML = (r.runs || []).map((x) => `<button data-run="${esc(x.id)}" style="text-align:left;margin-bottom:4px" ${editing || actionBusy ? "disabled" : ""}>
     <span class="mono dim2">${esc(x.mode)}</span> <span class="dim">${esc((x.request||"").slice(0,26))}</span>
-    <div class="mono dim2">${esc(x.workflow_status)} · ${esc(x.id)}</div></div>`).join("") || '<div class="empty">还没有草稿。</div>';
+    <div class="mono dim2">${x.id === selectedRunId ? "● " : ""}${esc(x.workflow_status)} · ${esc(x.id)}</div></button>`).join("") || '<div class="empty">还没有草稿。</div>';
+  $("p-runs").querySelectorAll("[data-run]").forEach(b => b.onclick = () => {
+    if(editing || actionBusy) return;
+    followLive = false;
+    selectRun(b.dataset.run).catch(e => { $("p-error").textContent = e.message; });
+  });
 }
 
 /* ---------- 轮询 ---------- */
-let lastTheater = {}, lastPipeline = {};
+let lastTheater = {}, lastPipeline = {}, polling = false;
+function pipelineView(){
+  const live = selectedRunId && selectedRunId === lastPipeline.run_id;
+  const record = live && lastPipeline.status === "running" ? lastPipeline : selectedRecord;
+  return {...(record || {}), ledger:lastPipeline.ledger,
+    provider:live ? lastPipeline.provider : record?.mock ? "mock（假模型）" : record ? "历史草稿" : ""};
+}
+function renderActive(){
+  const s = tab === "theater" ? lastTheater : pipelineView();
+  $("status").textContent = s.status || "idle";
+  $("status").className = "pill " + (s.status === "running" ? "run" : s.status === "done" ? "done" : s.status === "error" ? "err" : "");
+  $("provider").textContent = s.provider || "";
+  $("calls").textContent = s.calls ? `${s.calls} 次调用` : "";
+  if(tab === "theater") renderTheater(s); else renderPipeline(s);
+}
 async function tick(){
+  if(polling) return;
+  polling = true;
   try{
-    const s = await (await fetch("/api/theater/state")).json();
+    const [s, p] = await Promise.all([api("/api/theater/state"), api("/api/state")]);
     if(!known.length && s.known_characters){ known = s.known_characters; cast = known.slice(0,2); renderCast(); }
     if(!providers.length && s.providers){ providers = s.providers; renderProviders(); }
     if(!modes.length){
-      const p = await (await fetch("/api/state")).json();
       modes = p.modes || [];
       $("p-mode").innerHTML = modes.map((m) => `<option value="${esc(m.name)}">${esc(m.label)}</option>`).join("");
-      lastPipeline = p;
     }
-    lastTheater = s; renderTheater(s);
-    if(tab === "pipeline"){ renderPipeline(lastPipeline); }
-  }catch(e){ /* 服务没起来时不要刷屏 */ }
+    lastTheater = s; lastPipeline = p;
+    if(followLive && !selectedRunId && p.run_id) selectedRunId = p.run_id;
+    if(tab === "pipeline"){
+      await loadRuns();
+      const id = selectedRunId, seq = selectionSequence;
+      if(id){
+        const record = await api(`/api/runs/${encodeURIComponent(id)}`);
+        if(id === selectedRunId && seq === selectionSequence) selectedRecord = record;
+      }
+    }
+    renderActive();
+  }catch(e){ $("status").textContent = "连接失败"; $("status").className = "pill err"; }
+  finally{ polling = false; }
 }
 setInterval(tick, 1200); tick();
 
@@ -499,14 +577,56 @@ $("t-run").onclick = async () => {
   setTimeout(() => { $("t-run").disabled = false; }, 800);
 };
 $("t-cancel").onclick = () => fetch("/api/theater/cancel", { method:"POST" });
-$("p-run").onclick = async () => {
+async function pipelineAction(action){
+  if(actionBusy) return;
+  actionBusy = true; $("p-error").textContent = ""; renderActive();
+  try{ await action(); }
+  catch(e){ $("p-error").textContent = e.message; }
+  finally{ actionBusy = false; renderActive(); await tick(); }
+}
+async function startPipeline(sourceId = null, feedback = null){
   const body = { request: $("p-request").value || null, provider: $("p-provider").value || null,
     mode: $("p-mode").value, mock: $("p-mock").classList.contains("on"),
     closed_loop: $("p-loop").classList.contains("on") };
-  const r = await (await fetch("/api/run", { method:"POST",
-    headers:{ "Content-Type":"application/json" }, body: JSON.stringify(body) })).json();
-  if(!r.ok) alert(r.error || "启动失败");
-  setTimeout(loadRuns, 1200);
+  if(sourceId) Object.assign(body, {source_run_id:sourceId, request:null, mode:"workshop", closed_loop:true, feedback});
+  const r = await api("/api/run", "POST", body);
+  followLive = true;
+  await selectRun(r.run_id);
+}
+$("p-run").onclick = () => pipelineAction(() => startPipeline());
+$("p-cancel").onclick = () => pipelineAction(() => api("/api/cancel", "POST"));
+$("p-recheck").onclick = () => pipelineAction(() => startPipeline(selectedRunId));
+$("p-revise").onclick = () => pipelineAction(() => {
+  const feedback = $("p-feedback").value.trim();
+  if(!feedback) throw new Error("请填写定向修改意见");
+  return startPipeline(selectedRunId, feedback);
+});
+$("p-adopt").onclick = () => pipelineAction(async () => {
+  const id = selectedRunId;
+  await api(`/api/runs/${encodeURIComponent(id)}/adopt`, "POST");
+  await selectRun(id);
+});
+$("p-edit").onclick = () => {
+  if(!selectedRecord || actionBusy) return;
+  editing = true;
+  $("p-edit-scene").value = selectedRecord.scene;
+  $("p-edit-proposal").value = JSON.stringify(selectedRecord.proposal || {}, null, 2);
+  $("p-editor").classList.remove("hidden");
+  renderActive();
+};
+$("p-discard").onclick = () => {
+  editing = false; $("p-editor").classList.add("hidden"); renderActive();
+};
+$("p-save").onclick = () => pipelineAction(async () => {
+  const r = await api(`/api/runs/${encodeURIComponent(selectedRunId)}`, "PATCH", {
+    scene:$("p-edit-scene").value, proposal:JSON.parse($("p-edit-proposal").value)});
+  editing = false; $("p-editor").classList.add("hidden");
+  followLive = false; await selectRun(r.run_id);
+});
+$("p-next").onclick = () => {
+  followLive = false; selectedRunId = null; selectedRecord = null; selectionSequence++;
+  $("p-request").value = ""; $("p-feedback").value = ""; $("p-error").textContent = "";
+  renderActive(); $("p-request").focus();
 };
 </script>
 </body>
