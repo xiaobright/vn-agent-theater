@@ -157,13 +157,15 @@ def scheduler_snapshot() -> dict:
     return _SCHEDULER.snapshot()
 
 
-async def _network_attempt(cfg: Config, messages: list[dict], temperature: float, deadline: float):
+async def _network_attempt(cfg: Config, messages: list[dict], temperature: float, deadline: float,
+                           max_tokens: int | None = None):
     from openai import AsyncOpenAI
 
     timeout = min(cfg.request_timeout, _check(cfg, deadline))
     # 禁用 SDK 自动重试；总时限/取消由本层控制，避免嵌套重试翻倍。
     async with AsyncOpenAI(api_key=cfg.api_key, base_url=cfg.base_url, max_retries=0, timeout=timeout) as client:
-        args = {"model": cfg.model, "messages": messages, "temperature": temperature, "max_tokens": cfg.max_output_tokens}
+        args = {"model": cfg.model, "messages": messages, "temperature": temperature,
+                "max_tokens": max_tokens or cfg.max_output_tokens}
         if cfg.reasoning:
             args["extra_body"] = {"reasoning_effort": cfg.reasoning}
         task = asyncio.create_task(client.chat.completions.create(**args))
@@ -254,8 +256,13 @@ def _response_text(resp) -> tuple[str, dict]:
         raise LLMError("模型返回了无效响应结构；未自动重发") from None
 
 
-def chat(cfg: Config, messages: list[dict], *, temperature: float | None = None, mock_text: str = "[mock] 假输出。") -> tuple[str, dict, float]:
-    """排队、请求、退避均计入总时限，返回 (文本, usage, 耗时秒)。"""
+def chat(cfg: Config, messages: list[dict], *, temperature: float | None = None,
+         mock_text: str = "[mock] 假输出。", max_tokens: int | None = None) -> tuple[str, dict, float]:
+    """排队、请求、退避均计入总时限，返回 (文本, usage, 耗时秒)。
+
+    max_tokens 可按岗位覆盖：**推理 token 也算在 completion 里**（stepfun 实测如此），
+    所以要动脑的岗位（如观察者）用默认 4096 会写到一半就被截断。
+    """
     started = time.monotonic()
     deadline = started + cfg.request_deadline
     ticket = _SCHEDULER.ticket(cfg)
@@ -278,7 +285,9 @@ def chat(cfg: Config, messages: list[dict], *, temperature: float | None = None,
                     text, usage = mock_text, {"prompt_tokens": 0, "completion_tokens": 0}
                 else:
                     try:
-                        resp = asyncio.run(_network_attempt(cfg, messages, cfg.temperature if temperature is None else temperature, deadline))
+                        resp = asyncio.run(_network_attempt(
+                            cfg, messages, cfg.temperature if temperature is None else temperature,
+                            deadline, max_tokens))
                     except LLMError:
                         raise
                     except Exception as exc:

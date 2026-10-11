@@ -51,14 +51,31 @@ def inject_state_all(world: World) -> None:
         inject_state(world, name)
 
 
-def build_messages(world: World, actor: str, system_prompt: str) -> list[dict]:
+# 两种状态注入法，用来对比缓存命中与最终效果：
+#   trailing（默认）—— 状态作为每轮结尾的尾块追加，历史只追加不改写，前缀稳定。
+#   system          —— 状态写进系统提示词，每轮重算；第一条消息就变了，前缀必然断。
+INJECTIONS = ("trailing", "system")
+
+
+def build_messages(world: World, actor: str, system_prompt: str,
+                   injection: str = "trailing") -> list[dict]:
     """这个角色此刻该看到的完整 messages。
 
     渲染规则固定：自己的 turn 事件 = assistant，其余 = user；一个事件一条消息。
     不合并连续同角色消息，否则字节布局会随上下文变化，前缀就不再稳定。
+
+    trailing：状态块是**每轮结尾写入并冻结**的 state 事件，按轮次原地渲染。
+              历史只追加、永不重写，所以 messages(T) 是 messages(T+1) 的前缀。
+    system：  状态拼进系统提示词、每轮重算。代价是第一条消息就变了，前缀必然断。
     """
-    messages = [{"role": "system", "content": system_prompt}]
+    if injection not in INJECTIONS:
+        raise ValueError(f"未知注入方式：{injection}")
+    head = (system_prompt + "\n\n" + state_block(world, actor)
+            if injection == "system" else system_prompt)
+    messages = [{"role": "system", "content": head}]
     for event in world.view(actor):
+        if event.kind == "state" and injection == "system":
+            continue          # 这条路上状态走系统提示词，历史里不该再出现
         role = "assistant" if event.kind == "turn" and event.actor == actor else "user"
         messages.append({"role": role, "content": event.text_for(actor)})
     return messages

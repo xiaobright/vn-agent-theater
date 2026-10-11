@@ -9,7 +9,8 @@
 
 背景设定见 [全员存取档Meta系统设定_v7_整合版.md](./全员存取档Meta系统设定_v7_整合版.md)，
 架构设计见 [全员存取档_智能体团队架构图.md](./全员存取档_智能体团队架构图.md)，
-流水线实验结果见 [实验记录_协作模式对比.md](./实验记录_协作模式对比.md)。
+流水线实验结果见 [实验记录_协作模式对比.md](./实验记录_协作模式对比.md)，
+状态注入法的缓存/效果对比见 [实验记录_状态注入对比.md](./实验记录_状态注入对比.md)。
 
 ## 六种协作模式
 
@@ -54,6 +55,10 @@ uv run python -m agentteam.rejudge runs/<时间戳>_compare --provider stepfun
 uv run python -m agentteam.theater.run --mock --turns 4              # 走完存读档，不花钱
 uv run python -m agentteam.theater.run --turns 6                     # 真模型
 uv run python -m agentteam.theater.run --beats data/beats_双线夜戏.json   # 双线场景
+
+# 6) 对比两种状态注入法（缓存命中 + 跨族评审看效果）
+uv run python -m agentteam.theater.compare_injection --beats data/beats_双线夜戏.json \
+    --temperature 0 --provider stepfun --judge-provider longcat
 ```
 
 > **评审务必跨族。** 实验发现：用写作模型自己评审自己的产出，会放过机制硬伤
@@ -210,8 +215,11 @@ runs/           产物（自动生成，已 gitignore）
   表达不了"读档 = 世界回溯 + 所有人记忆替换 + 存档库不回退"，所以那类剧情一律 `needs_input`。
   **这件事在角色剧场里已经解决了**——剧场就是为它做的。
 - **流水线只跑一段戏**：一场戏采纳后能接着写下一场，但还不能自动连跑多场。
-- **剧场没有实测缓存命中率**：前缀稳定性有断言保证（`PrefixCacheTests`），但 stepfun/longcat
-  实际命中率还没量。这决定这套架构的经济性，是下一步。
+- **剧场的缓存收益还没在长场景上量出来**：短场景（3 轮）里两种注入法差距约 15 个百分点，
+  而且随运行顺序翻转——因为静态系统提示词占了大头，128 token 的块粒度把 append-only 的
+  边际优势抹平了。要历史 ≫ 系统提示词才看得出差别。见实验记录。
+- **"状态放最后更容易被看住"只是线索**：跨族评审抓到过一次 system 模式下角色报错自己
+  存到哪个槽，trailing 全对。n=1，待复现。
 - **剧场的导演不会自己决定收场**：轮次目前是固定给的。
 
 ## 观察台看什么

@@ -61,16 +61,16 @@ def parse_reply(text: str) -> dict:
 
 
 def take_turn(cfg: Config, rec: Recorder, world: World, name: str, system_prompt: str,
-              mock_text: str) -> dict:
+              mock_text: str, injection: str = "trailing") -> dict:
     """走完一轮。返回解析结果；界面操作由调用方（导演）执行。"""
     check_cancelled(cfg)
-    messages = build_messages(world, name, system_prompt)
+    messages = build_messages(world, name, system_prompt, injection=injection)
     scoped = for_role(cfg, name)
     text, usage, elapsed = chat(scoped, messages, mock_text=mock_text)
     rec.record(role=f"演员_{name}", model=scoped.model, messages=messages,
                response=text, usage=usage, elapsed=elapsed,
                extra={"turn": world.live[1], "branch": world.live[0],
-                      "context_messages": len(messages)})
+                      "context_messages": len(messages), "injection": injection})
     return parse_reply(text)
 
 

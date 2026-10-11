@@ -55,7 +55,7 @@ class Config:
     max_retries: int = 2
     retry_base: float = 1.0
     retry_cap: float = 30.0
-    max_output_tokens: int = 4096
+    max_output_tokens: int = 16384
     max_revisions: int = 1
     cancel_event: threading.Event | None = field(default=None, repr=False, compare=False)
     on_request_event: Callable[[dict], None] | None = field(default=None, repr=False, compare=False)
@@ -158,7 +158,8 @@ def load_config(mock: bool = False, provider: str | None = None, reasoning: str 
         max_retries=_number("LLM_MAX_RETRIES", 2),
         retry_base=_number("LLM_RETRY_BASE", 1, float),
         retry_cap=_number("LLM_RETRY_CAP", 30, float),
-        max_output_tokens=_number("LLM_MAX_OUTPUT_TOKENS", 4096),
+        # 注意：这里的 fallback 必须跟 Config 的字段默认值一致，否则改了 dataclass 也没用。
+        max_output_tokens=_number("LLM_MAX_OUTPUT_TOKENS", Config.__dataclass_fields__["max_output_tokens"].default),
         max_revisions=_number("LLM_MAX_REVISIONS", 1),
     )
 

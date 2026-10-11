@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 
@@ -42,9 +43,16 @@ def main() -> None:
                          "stage 写成 {角色: 文字} 就是双线（各人只看到自己那一段）")
     ap.add_argument("--request", default=None, help="本场目标（不填用内置示例）")
     ap.add_argument("--no-observer", action="store_true", help="不跑语义层观察者")
+    ap.add_argument("--injection", default="trailing", choices=["trailing", "system"],
+                    help="状态注入法：trailing=每轮结尾追加尾块（保前缀缓存）；"
+                         "system=写进系统提示词（每轮改写，前缀必断）")
+    ap.add_argument("--temperature", type=float, default=None,
+                    help="覆盖 .env 的温度；对比实验建议用 0 减少采样噪声")
     args = ap.parse_args()
 
     cfg = load_config(mock=args.mock, provider=args.provider, reasoning=args.reasoning)
+    if args.temperature is not None:
+        cfg = replace(cfg, temperature=args.temperature)
     request = args.request or DEFAULT_REQUEST
     rules = load_rules()
     bibles = load_bibles()
@@ -63,6 +71,7 @@ def main() -> None:
 
     print(f"模型：{cfg.describe()}")
     print(f"角色：{'、'.join(args.cast)} · {args.turns} 轮 · 起始 {args.world_date}")
+    print(f"状态注入：{args.injection} · 温度 {cfg.temperature}")
     print(f"目标：{request[:60]}…\n")
 
     def on_event(kind: str, payload=None) -> None:
@@ -89,7 +98,8 @@ def main() -> None:
             print(f"    · {payload['actor']} 本轮不动（{payload['reason']}）")
 
     result = run_scene(cfg, rec, world, request=request, rules=rules, bibles=bibles,
-                       beats=beats, observe=not args.no_observer, on_event=on_event)
+                       beats=beats, observe=not args.no_observer,
+                       injection=args.injection, on_event=on_event)
 
     # ---- 落盘 ----
     rec.write_json("inputs.json", {"request": request, "cast": args.cast, "beats": beats,
@@ -111,6 +121,9 @@ def main() -> None:
         f"- 结构层问题：{len(result['issues'])}",
         f"- 界面操作：{len(result['interface_ops'])}",
         f"- 调用次数：{rec.seq}",
+        f"- 状态注入：{args.injection}",
+        f"- 输入 token：{rec.usage_total['prompt_tokens']}（其中缓存命中 {rec.usage_total['cached_tokens']}）",
+        f"- 输出 token：{rec.usage_total['completion_tokens']}",
         "",
         "## 正文", result["prose"], "",
         "## 客观日志", "```json", json.dumps(result["belief"]["objective"], ensure_ascii=False, indent=2), "```", "",
@@ -118,8 +131,12 @@ def main() -> None:
         "## 观察者报告", *[f"- {r['status']}：{r['reason']}" for r in result["observer_reports"]],
     ])
 
+    u = rec.usage_total
+    hit = (u["cached_tokens"] / u["prompt_tokens"] * 100) if u["prompt_tokens"] else 0
     print(f"\n完成：{result['played']} 轮 · {rec.seq} 次调用 · 暂停={result['paused'] or '无'}"
           f" · 当前指针 {result['live']['branch']}·第{result['live']['turn']}轮")
+    print(f"     输入 {u['prompt_tokens']} tok（缓存命中 {u['cached_tokens']}，{hit:.0f}%）"
+          f" · 输出 {u['completion_tokens']} tok")
     if result["issues"]:
         print(f"结构层问题 {len(result['issues'])} 条：")
         for issue in result["issues"]:

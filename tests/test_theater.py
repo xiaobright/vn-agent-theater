@@ -20,7 +20,8 @@ import unittest
 from agentteam.config import load_config
 from agentteam.recorder import Recorder
 from agentteam.theater import observer as observer_mod
-from agentteam.theater.context import build_messages, inject_state_all, is_prefix, state_block
+from agentteam.theater.context import (build_messages, inject_state_all, is_prefix,
+                                       prefix_len, state_block)
 from agentteam.theater.director import beats_for, run_scene
 from agentteam.theater.world import SLOT_COUNT, TheaterError, World
 
@@ -334,6 +335,64 @@ class PrefixCacheTests(unittest.TestCase):
         self.assertIn("读档前发生的一切", seen(w, "首领"))
 
 
+class InjectionMethodTests(unittest.TestCase):
+    """两种状态注入法：trailing 保前缀，system 断前缀。这是可断言的，不靠感觉。"""
+
+    def test_trailing_keeps_the_prefix_across_turns(self):
+        w = new_world()
+        play(w, "第一天·黄昏", [("主角", "第一轮", "")])
+        snaps = [build_messages(w, "主角", SYS, injection="trailing")]
+        for turn in range(2, 5):
+            play(w, f"第{turn}天", [("主角", f"第{turn}轮", "")])
+            snaps.append(build_messages(w, "主角", SYS, injection="trailing"))
+        for earlier, later in zip(snaps, snaps[1:]):
+            self.assertTrue(is_prefix(earlier, later))
+
+    def test_system_injection_breaks_the_prefix_at_message_zero(self):
+        w = new_world()
+        play(w, "第一天·黄昏", [("主角", "第一轮", "")])
+        first = build_messages(w, "主角", SYS, injection="system")
+        play(w, "第二天", [("主角", "第二轮", "")])
+        w.save("主角", 1, "新档")          # 状态变了
+        w.advance("第三天")
+        inject_state_all(w)
+        later = build_messages(w, "主角", SYS, injection="system")
+        # 系统提示词（第 0 条）就不同了，所以连第一条都对不上
+        self.assertNotEqual(first[0], later[0])
+        self.assertEqual(prefix_len(first, later), 0)
+        self.assertIn("新档", later[0]["content"])
+
+    def test_both_methods_carry_the_same_state_content(self):
+        """两条路只是承载方式不同，角色看到的状态内容应当一致。"""
+        w = new_world()
+        play(w, "第一天·黄昏", [("主角", "第一轮", "")])
+        w.save("主角", 2, "对照档")
+        w.advance("第二天")
+        inject_state_all(w)
+        block = state_block(w, "主角")
+        trailing = build_messages(w, "主角", SYS, injection="trailing")
+        system = build_messages(w, "主角", SYS, injection="system")
+        self.assertIn(block, trailing[-1]["content"])      # trailing：尾块
+        self.assertIn(block, system[0]["content"])          # system：系统提示词
+        self.assertNotIn("状态注入", "\n".join(m["content"] for m in system[1:]))
+
+    def test_system_mode_keeps_state_out_of_history(self):
+        """system 模式下历史里不该再有 state 事件，否则同一份状态会出现两次。"""
+        w = new_world()
+        with tempfile.TemporaryDirectory() as tmp:
+            rec = Recorder(pathlib.Path(tmp))
+            run_scene(load_config(mock=True), rec, w, request="测试",
+                      rules="（测试用规则）", bibles={},
+                      beats=beats_for(w, 2, w.characters, "第三天·夜"),
+                      observe=False, injection="system")
+        self.assertEqual([e for e in w.path_events() if e.kind == "state"], [])
+
+    def test_unknown_injection_is_rejected(self):
+        w = new_world()
+        with self.assertRaises(ValueError):
+            build_messages(w, "主角", SYS, injection="whatever")
+
+
 class ObserverTests(unittest.TestCase):
     """结构层泄漏检测：隔离是结构性的，所以泄漏只可能是模型自己编出来的。"""
 
@@ -429,6 +488,31 @@ class DirectorTests(unittest.TestCase):
         self.assertNotIn("你在据点里复盘", seen(world, "主角"))
         self.assertIn("你在据点里复盘", seen(world, "首领"))
         self.assertNotIn("你回到住处", seen(world, "首领"))
+
+    def test_groups_hide_actions_across_tracks(self):
+        """只分开 stage 不够：不声明 groups 的话，两个地方的人还能看到彼此的动作，双线会塌。"""
+        world = new_world()
+        beats = [{"world_date": "第三天·夜", "cast": world.characters,
+                  "stage": {"主角": "你在住处。", "首领": "你在据点。"},
+                  "groups": [["主角"], ["首领"]]}]
+        with tempfile.TemporaryDirectory() as tmp:
+            rec = Recorder(pathlib.Path(tmp))
+            run_scene(load_config(mock=True), rec, world, request="双线",
+                      rules="（测试用规则）", bibles={}, beats=beats, observe=False)
+        # mock 回复里带角色名，正好用来验证"看不看得到对方的行动"
+        self.assertIn("主角环顾四周", seen(world, "主角"))
+        self.assertNotIn("首领环顾四周", seen(world, "主角"))
+        self.assertNotIn("主角环顾四周", seen(world, "首领"))
+
+    def test_without_groups_everyone_is_a_witness(self):
+        world = new_world()
+        beats = [{"world_date": "第三天·夜", "cast": world.characters, "stage": "同一条街上。"}]
+        with tempfile.TemporaryDirectory() as tmp:
+            rec = Recorder(pathlib.Path(tmp))
+            run_scene(load_config(mock=True), rec, world, request="同场",
+                      rules="（测试用规则）", bibles={}, beats=beats, observe=False)
+        self.assertIn("首领环顾四周", seen(world, "主角"))
+        self.assertIn("主角环顾四周", seen(world, "首领"))
 
 
 if __name__ == "__main__":

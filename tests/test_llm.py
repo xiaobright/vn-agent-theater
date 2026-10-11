@@ -103,7 +103,17 @@ class LLMTests(unittest.TestCase):
         self.assertTrue(all(c.closed for c in sdk.clients))
         self.assertEqual(sdk.clients[0].options["max_retries"], 0)
         self.assertGreater(sdk.clients[0].options["timeout"], 0)
-        self.assertEqual(sdk.calls[0]["max_tokens"], 4096)
+        self.assertEqual(sdk.calls[0]["max_tokens"], Config.__dataclass_fields__["max_output_tokens"].default)
+        self.assert_idle()
+
+    def test_max_tokens_can_be_overridden_per_call(self):
+        """推理 token 也算在 completion 里，所以要动脑的岗位可以单独要更大的预算。"""
+        async def action(n, args):
+            return response()
+        sdk = SDK(action)
+        with patch("openai.AsyncOpenAI", sdk):
+            llm.chat(config(), [], max_tokens=9999)
+        self.assertEqual(sdk.calls[0]["max_tokens"], 9999)
         self.assert_idle()
 
     def test_global_cap_across_independent_configs(self):

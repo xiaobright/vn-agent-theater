@@ -27,6 +27,11 @@ from .world import World
 
 MIN_SECRET_LEN = 6
 
+# 观察者要动脑（对照日志、盲区表和结构层证据），而**推理 token 也算进 completion**
+# 预算（stepfun 实测：2366 completion 只吐出 93 字正文）。用默认 4096 会写到一半被截断，
+# 所以这个岗位单独给一个大预算。
+OBSERVER_MAX_TOKENS = 8192
+
 
 def _normalize(text: str) -> str:
     return re.sub(r"\s+", "", text or "")
@@ -92,7 +97,7 @@ def observe(cfg: Config, rec: Recorder, world: World, request: str,
         "# 当前世界状态\n" + json.dumps(world.character_state(), ensure_ascii=False, indent=2),
     ])
     messages = [{"role": "system", "content": card}, {"role": "user", "content": user}]
-    text, usage, elapsed = chat(cfg, messages,
+    text, usage, elapsed = chat(cfg, messages, max_tokens=max(cfg.max_output_tokens, OBSERVER_MAX_TOKENS),
                                 mock_text=mock_text or json.dumps(
                                     {"status": "ok", "divergences": [], "reason": "未发现机制违反。"},
                                     ensure_ascii=False))

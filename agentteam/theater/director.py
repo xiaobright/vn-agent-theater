@@ -17,11 +17,11 @@ import json
 from typing import Callable
 
 from ..config import PROMPTS_DIR, Config
-from ..llm import chat, check_cancelled
+from ..llm import LLMError, chat, check_cancelled
 from ..recorder import Recorder
 from . import actor as actor_mod
 from . import observer as observer_mod
-from .context import build_messages, inject_state_all
+from .context import INJECTIONS, build_messages, inject_state_all
 from .world import TheaterError, World
 
 
@@ -48,7 +48,15 @@ def render_prose(cfg: Config, rec: Recorder, world: World, request: str,
             + json.dumps(log, ensure_ascii=False, indent=2))
     messages = [{"role": "system", "content": card}, {"role": "user", "content": user}]
     fallback = "\n\n".join(f"【第{e['turn']}轮 · {e['world_date']}】{e['public']}" for e in log)
-    text, usage, elapsed = chat(cfg, messages, mock_text=mock_text or fallback)
+    try:
+        text, usage, elapsed = chat(cfg, messages, mock_text=mock_text or fallback)
+    except LLMError as exc:
+        # 渲染失败不该让整场作废：事件日志是事实，直接交日志，标出来。
+        # 这一笔也要落盘，否则产物里看不到"写手其实失败了"，会把降级稿当成正常稿。
+        text = "（写手渲染失败，以下直接给出客观事件日志。）\n\n" + fallback
+        rec.record(role="写手", model=cfg.model, messages=messages, response=text,
+                   usage={}, elapsed=0.0, extra={"degraded": True, "error": str(exc)})
+        return text
     rec.record(role="写手", model=cfg.model, messages=messages, response=text,
                usage=usage, elapsed=elapsed)
     return text
@@ -64,13 +72,18 @@ def run_scene(
     bibles: dict[str, str],
     beats: list[dict] | None = None,
     observe: bool = True,
+    injection: str = "trailing",
     on_event: Callable[[str, object], None] | None = None,
 ) -> dict:
     emit = on_event or (lambda kind, payload=None: None)
+    if injection not in INJECTIONS:
+        raise ValueError(f"未知注入方式：{injection}")
     beats = beats or default_beats(world)
     prompts = {name: actor_mod.actor_prompt(name, bibles.get(name, ""), rules)
                for name in world.characters}
-    inject_state_all(world)
+    # system 模式下状态走系统提示词，历史里不再写 state 事件。
+    inject = inject_state_all if injection == "trailing" else (lambda w: None)
+    inject(world)
 
     issues: list[dict] = []
     ops: list[dict] = []
@@ -84,7 +97,7 @@ def run_scene(
         world.advance(beat.get("world_date"))
         played += 1
         # stage 是字符串 → 一条人人可见的世界事件；是 {角色: 文字} → 各人只看到自己那一段。
-        # 双线戏就靠后者：两人在两个地方，各自的情境不进对方的上下文。
+        # 双线戏要的是后者 + groups。
         stage = beat.get("stage")
         if isinstance(stage, dict):
             for name, text in stage.items():
@@ -92,6 +105,15 @@ def run_scene(
                     world.append("scene", public=text, present=(name,))
         elif stage:
             world.append("scene", public=stage, present=cast)
+        # groups 决定"谁能看到谁的行动"。默认所有人同场；双线就写成 [["主角"],["首领"]]，
+        # 否则两人在两个地方却能看到彼此的动作，双线会塌成一场。
+        groups = [tuple(g) for g in (beat.get("groups") or [cast])]
+
+        def witnesses(name: str) -> tuple[str, ...]:
+            for group in groups:
+                if name in group:
+                    return group
+            return tuple(cast)
         emit("turn", {"index": played, "world_date": world.world_date, "cast": cast,
                       "branch": world.live[0]})
 
@@ -105,14 +127,21 @@ def run_scene(
                 world.declare_intent(name, "本轮想行动")
                 emit("skip", {"actor": name, "reason": "世界正被他人暂停"})
                 continue
-            reply = actor_mod.take_turn(
-                cfg, rec, world, name, prompts[name],
-                actor_mod.mock_reply(world.live[1], name, _mock_op(world, name, played)))
+            try:
+                reply = actor_mod.take_turn(
+                    cfg, rec, world, name, prompts[name],
+                    actor_mod.mock_reply(world.live[1], name, _mock_op(world, name, played)),
+                    injection=injection)
+            except LLMError as exc:
+                # 单个角色这一轮答不上来，不该把整场戏弄崩：记下来，他本轮不动。
+                issues.append({"kind": "actor_failed", "actor": name, "message": str(exc)})
+                emit("skip", {"actor": name, "reason": f"本轮调用失败：{exc}"})
+                continue
             emit("actor", {"actor": name, "action": reply["action"],
                            "inner": reply["inner"], "interface": reply["interface_raw"]})
             try:
                 world.append("turn", actor=name, public=reply["action"],
-                             private=reply["inner"], present=cast)
+                             private=reply["inner"], present=witnesses(name))
             except TheaterError as exc:
                 issues.append({"kind": "illegal_action", "actor": name, "message": str(exc)})
                 continue
@@ -127,20 +156,23 @@ def run_scene(
                 if op.get("op") == "load" and op.get("ok"):
                     # 读档把世界换掉了：本轮剩下的行动者已经不在这个世界里，
                     # 他们的行动从未发生（R03）。立刻重建所有人的上下文与状态块。
-                    inject_state_all(world)
+                    inject(world)
                     emit("rewind", op["detail"])
                     rewound = True
                     break
 
-        inject_state_all(world)
+        inject(world)
         if rewound:
             emit("turn_ended", {"reason": "读档改写了世界，本轮就此结束"})
         if observe:
             try:
                 report = observer_mod.observe(cfg, rec, world, request, issues)
-            except (ValueError, json.JSONDecodeError) as exc:
-                report = {"status": "ok", "divergences": [], "reason": f"观察者输出无效：{exc}",
-                          "structural": []}
+            except (ValueError, json.JSONDecodeError, LLMError) as exc:
+                # 观察者是**建议性**的：它这一轮答不上来，不该把整场戏弄崩。
+                # 记一条"未能判定"，继续演，由人看。
+                report = {"status": "unknown", "divergences": [],
+                          "reason": f"观察者本轮未能给出结论：{exc}", "structural": []}
+                emit("observer_error", {"message": str(exc)})
             reports.append(report)
             emit("observer", report)
             if report["status"] == "pause":
@@ -151,6 +183,7 @@ def run_scene(
     prose = render_prose(cfg, rec, world, request)
     return {
         "request": request,
+        "injection": injection,
         "prose": prose,
         "played": played,
         "live": {"branch": world.live[0], "turn": world.live[1], "world_date": world.world_date},

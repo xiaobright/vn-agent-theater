@@ -14,13 +14,28 @@ from pathlib import Path
 from uuid import uuid4
 
 
+def cached_tokens(usage: dict | None) -> int:
+    """从 usage 里取缓存命中的输入 token。
+
+    不同 provider 放的位置不一样（顶层 cached_tokens，或 prompt_tokens_details 里）。
+    拿不到就返回 0——"没报告"和"没命中"在这里不做区分，报告里会说明。
+    """
+    if not isinstance(usage, dict):
+        return 0
+    for value in (usage.get("cached_tokens"),
+                  (usage.get("prompt_tokens_details") or {}).get("cached_tokens")):
+        if isinstance(value, int) and not isinstance(value, bool):
+            return value
+    return 0
+
+
 class Recorder:
     def __init__(self, run_dir: Path):
         self.run_dir = run_dir
         self.run_dir.mkdir(parents=True, exist_ok=True)
         self.seq = 0
         self.index: list[dict] = []
-        self.usage_total = {"prompt_tokens": 0, "completion_tokens": 0}
+        self.usage_total = {"prompt_tokens": 0, "completion_tokens": 0, "cached_tokens": 0}
         self._lock = threading.Lock()  # 角色分析是并发调用，编号要加锁
 
     def record(
