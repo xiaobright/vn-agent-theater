@@ -22,6 +22,8 @@ from ..main import DEFAULT_REQUEST, load_bibles
 from ..recorder import Recorder
 from ..rules import load_rules
 from .director import beats_for, run_scene
+from .physics import Scene
+from .timeline import Timeline
 from .world import World
 
 
@@ -41,6 +43,10 @@ def main() -> None:
     ap.add_argument("--beats", default=None,
                     help="场景节拍 JSON 文件：每项 {world_date, stage, cast}；"
                          "stage 写成 {角色: 文字} 就是双线（各人只看到自己那一段）")
+    ap.add_argument("--scene", default=None,
+                    help="场景 JSON（地点/初始位置/物品/schedule）：给了就走**事件驱动**时间线，"
+                         "角色自己声明何时醒，时间跳到下一个触发时刻")
+    ap.add_argument("--max-turns", type=int, default=10, help="事件驱动模式最多跑几轮")
     ap.add_argument("--request", default=None, help="本场目标（不填用内置示例）")
     ap.add_argument("--no-observer", action="store_true", help="不跑语义层观察者")
     ap.add_argument("--injection", default="trailing", choices=["trailing", "system"],
@@ -56,15 +62,29 @@ def main() -> None:
     request = args.request or DEFAULT_REQUEST
     rules = load_rules()
     bibles = load_bibles()
-    world = World(args.world_date, args.cast)
-    if args.beats:
+    timeline = None
+    scene = None
+    if args.scene:
+        data = json.loads(Path(args.scene).read_text(encoding="utf-8"))
+        cast = args.cast or list((data.get("characters") or {}).keys())
+        scene = Scene.from_dict(data, cast)
+        args.cast = cast
+        world = World(data.get("world_date", args.world_date), cast, scene,
+                      clock=int(data.get("clock", 0)))
+        timeline = Timeline(schedule=[tuple(x) for x in data.get("schedule", [[0, "起点"]])])
+        args.world_date = data.get("world_date", args.world_date)
+    else:
+        world = World(args.world_date, args.cast)
+    if args.beats and timeline is None:
         beats = json.loads(Path(args.beats).read_text(encoding="utf-8"))
         if not isinstance(beats, list) or not beats:
             raise SystemExit("beats 文件必须是一个非空数组")
         for beat in beats:
             beat.setdefault("cast", args.cast)
-    else:
+    elif timeline is None:
         beats = beats_for(world, args.turns, args.cast, args.world_date)
+    else:
+        beats = None
 
     run_dir = RUNS_DIR / (datetime.now().strftime("%Y%m%d_%H%M%S") + "_theater")
     rec = Recorder(run_dir)
@@ -72,6 +92,7 @@ def main() -> None:
     print(f"模型：{cfg.describe()}")
     print(f"角色：{'、'.join(args.cast)} · {args.turns} 轮 · 起始 {args.world_date}")
     print(f"状态注入：{args.injection} · 温度 {cfg.temperature}")
+    print(f"排程：{'事件驱动（角色自己声明何时醒）' if timeline else '固定轮次'}")
     print(f"目标：{request[:60]}…\n")
 
     def on_event(kind: str, payload=None) -> None:
@@ -96,14 +117,29 @@ def main() -> None:
             print(f"    ⏸ 暂停：{payload['reason']}")
         elif kind == "skip":
             print(f"    · {payload['actor']} 本轮不动（{payload['reason']}）")
+        elif kind == "wake":
+            why = payload.get("note") or payload.get("type")
+            print(f"\n▶ T+{payload['clock']}min · {payload['world_date']} · "
+                  f"叫醒 {payload['actor']}（{payload['type']}：{why}）")
+        elif kind == "next":
+            print(f"      → 下次：{payload['kind']} @ T+{payload['at']}min"
+                  f"（{payload['world_date']}）")
+        elif kind == "action":
+            mark = "✓" if payload.get("ok") else "✗"
+            print(f"      {mark} 判定 {payload['spec'].get('op')}：{payload['public']}")
+        elif kind == "action_rejected":
+            print(f"      ⚠ 做不到：{payload['reason']}")
+        elif kind == "end":
+            print(f"    — 收场：{payload['reason']}")
 
     result = run_scene(cfg, rec, world, request=request, rules=rules, bibles=bibles,
-                       beats=beats, observe=not args.no_observer,
+                       beats=beats, timeline=timeline, max_turns=args.max_turns,
+                       observe=not args.no_observer,
                        injection=args.injection, on_event=on_event)
 
     # ---- 落盘 ----
     rec.write_json("inputs.json", {"request": request, "cast": args.cast, "beats": beats,
-                                   "rules": rules, "bibles": bibles})
+                                   "scene_file": args.scene, "rules": rules, "bibles": bibles})
     rec.write_json("result.json", result)
     rec.write_text("prose.md", result["prose"])
     rec.write_json("log.json", [{"turn": e.turn, "kind": e.kind, "actor": e.actor,

@@ -118,7 +118,14 @@
       <div><label>出场角色</label><div id="t-cast" class="chips"></div></div>
       <div class="tight" style="width:110px"><label>轮数</label>
         <input id="t-turns" type="number" min="1" max="20" value="4"></div>
-      <div style="width:150px"><label>起始世界日期</label>
+      <div style="width:170px"><label>排程</label>
+        <select id="t-mode">
+          <option value="timeline">事件驱动（角色自己声明何时醒）</option>
+          <option value="beats">固定轮次（受控对照）</option>
+        </select></div>
+      <div style="width:190px"><label>场景文件（data/ 下）</label>
+        <input id="t-scene" value="scene_大乱斗.json"></div>
+      <div style="width:130px"><label>起始世界日期</label>
         <input id="t-date" value="第三天·夜"></div>
       <div style="width:130px"><label>provider</label><select id="t-provider"></select></div>
       <div class="tight" style="width:auto"><label>选项</label>
@@ -146,6 +153,12 @@
       <div class="card"><h2>快照图 · 分支与指针</h2>
         <div id="t-graph"></div>
         <div id="t-slots" class="mono" style="margin-top:10px"></div>
+      </div>
+      <div class="card"><h2>位置与状态（机械判定用）</h2>
+        <div id="t-numeric" class="mono"></div>
+      </div>
+      <div class="card"><h2>唤醒时间线（谁在何时醒）</h2>
+        <div id="t-wakes" class="log"></div>
       </div>
       <div class="card"><h2>世界动作</h2>
         <div id="t-history" class="log mono"></div>
@@ -345,6 +358,39 @@ function renderBelief(b){
       两个角色的盲区不同，隔离才是真的。盲区相同或都为空，就说明上下文漏了。</div>`;
 }
 
+function renderNumeric(state, names){
+  if(!state){ $("t-numeric").innerHTML = '<div class="empty">还没有开演。</div>'; return; }
+  const keys = Object.keys(state);
+  $("t-numeric").innerHTML = keys.map((n) => {
+    const s = state[n] || {};
+    const cond = {"ok":"完好","injured":"受伤","restrained":"被制住","dead":"已死"}[s.condition] || s.condition || "?";
+    const c = s.condition === "dead" ? "var(--bad)" : s.condition === "ok" ? "var(--ok)" : "var(--warn)";
+    const inv = (s.inventory && s.inventory.length) ? s.inventory.join("、") : "空手";
+    const near = (s.nearby && s.nearby.length) ? s.nearby.join("、") : "没人";
+    return `<div style="margin-bottom:5px">
+      <i class="badge" style="background:${colorOf(n,keys)}"></i><b>${esc(n)}</b>
+      <div style="margin-left:15px">
+        位置 <b>${esc(s.location_label || s.location || "?")}</b> ·
+        状态 <span style="color:${c}">${esc(cond)}</span> ·
+        手里 ${esc(inv)} · 同地点 ${esc(near)}
+      </div></div>`;
+  }).join("");
+}
+
+function renderWakes(wakes){
+  if(!wakes || !wakes.length){ $("t-wakes").innerHTML = '<div class="empty">固定轮次模式，没有唤醒记录。</div>'; return; }
+  $("t-wakes").innerHTML = wakes.map((w) => {
+    const tone = w.type === "observe" ? "var(--accent)" : w.type === "fallback" || w.type === "forced"
+               ? "var(--warn)" : "var(--dim)";
+    return `<div style="padding:3px 0;border-bottom:1px solid #1e2530">
+      <span class="mono" style="color:${tone}">T+${w.clock}min</span>
+      <span class="dim2 mono"> ${esc(w.world_date || "")}</span>
+      叫醒 <b>${esc(w.actor || "")}</b>
+      <span class="dim2 mono">（${esc(w.type || "")}${w.target ? " → " + esc(w.target) : ""}）</span>
+      <div class="dim">${esc(w.note || "")}</div></div>`;
+  }).join("");
+}
+
 function renderTheater(s){
   $("status").textContent = s.status || "idle";
   $("status").className = "pill " + (s.status === "running" ? "run" : s.status === "done" ? "done" : s.status === "error" ? "err" : "");
@@ -353,6 +399,8 @@ function renderTheater(s){
   if(s.error) $("t-observer").innerHTML = `<div style="color:var(--bad)">${esc(s.error)}</div>`;
 
   drawGraph(s.graph, s.state);
+  renderNumeric(s.state);
+  renderWakes(s.wakes);
   renderObjective(s.objective);
   renderContexts(s.contexts, s.state, s.characters || []);
   renderBelief(s.belief);
@@ -440,7 +488,9 @@ chip($("p-mock"), true); chip($("p-loop"), true);
 $("t-run").onclick = async () => {
   const body = { request: $("t-request").value || null, provider: $("t-provider").value || null,
     mock: $("t-mock").classList.contains("on"), observe: $("t-observe").classList.contains("on"),
-    turns: +$("t-turns").value || 4, cast, world_date: $("t-date").value || "第三天·夜" };
+    turns: +$("t-turns").value || 4, max_turns: +$("t-turns").value || 4, cast,
+    mode: $("t-mode").value, scenario: $("t-scene").value || null,
+    world_date: $("t-date").value || "第三天·夜" };
   $("t-run").disabled = true;
   const r = await (await fetch("/api/theater/run", { method:"POST",
     headers:{ "Content-Type":"application/json" }, body: JSON.stringify(body) })).json();

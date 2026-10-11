@@ -500,9 +500,9 @@ class DirectorTests(unittest.TestCase):
             run_scene(load_config(mock=True), rec, world, request="双线",
                       rules="（测试用规则）", bibles={}, beats=beats, observe=False)
         # mock 回复里带角色名，正好用来验证"看不看得到对方的行动"
-        self.assertIn("主角环顾四周", seen(world, "主角"))
-        self.assertNotIn("首领环顾四周", seen(world, "主角"))
-        self.assertNotIn("主角环顾四周", seen(world, "首领"))
+        self.assertIn("主角按自己的性格", seen(world, "主角"))
+        self.assertNotIn("首领按自己的性格", seen(world, "主角"))
+        self.assertNotIn("主角按自己的性格", seen(world, "首领"))
 
     def test_without_groups_everyone_is_a_witness(self):
         world = new_world()
@@ -511,8 +511,8 @@ class DirectorTests(unittest.TestCase):
             rec = Recorder(pathlib.Path(tmp))
             run_scene(load_config(mock=True), rec, world, request="同场",
                       rules="（测试用规则）", bibles={}, beats=beats, observe=False)
-        self.assertIn("首领环顾四周", seen(world, "主角"))
-        self.assertIn("主角环顾四周", seen(world, "首领"))
+        self.assertIn("首领按自己的性格", seen(world, "主角"))
+        self.assertIn("主角按自己的性格", seen(world, "首领"))
 
 
 if __name__ == "__main__":

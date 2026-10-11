@@ -52,9 +52,11 @@ uv run python -m agentteam.compare --modes team single team_fullctx groupchat gr
 uv run python -m agentteam.rejudge runs/<时间戳>_compare --provider stepfun
 
 # 5) 角色剧场（另一种拓扑：上下文即记忆）
-uv run python -m agentteam.theater.run --mock --turns 4              # 走完存读档，不花钱
+uv run python -m agentteam.theater.run --mock --turns 4              # 固定轮次，走完存读档
 uv run python -m agentteam.theater.run --turns 6                     # 真模型
 uv run python -m agentteam.theater.run --beats data/beats_双线夜戏.json   # 双线场景
+#    事件驱动时间线 + 最小数值层（大乱斗：位置/状态/物品，角色自己声明何时醒）
+uv run python -m agentteam.theater.run --mock --scene data/scene_大乱斗.json --max-turns 6
 
 # 6) 对比两种状态注入法（缓存命中 + 跨族评审看效果）
 uv run python -m agentteam.theater.compare_injection --beats data/beats_双线夜戏.json \
@@ -195,6 +197,8 @@ agentteam/
   web/index.html 观察台前端（单文件，无构建）
   theater/      角色剧场：每个角色一个只追加的扮演循环（见 角色剧场设计.md）
     world.py      事件日志 + 分支指针 + 三槽（唯一非派生状态）
+    timeline.py   事件驱动时间线：时间跳到下一个触发时刻 + 角色自己声明何时醒
+    physics.py    最小数值层：位置/状态/物品 + 种子随机裁决器（不看文笔判胜负）
     context.py    静态系统提示 + 只追加历史 + 每轮结尾状态注入
     actor.py      演员循环、界面操作协议、信念矩阵
     director.py   派轮次、执行读档全局栅栏、写手渲染
@@ -205,6 +209,7 @@ data/
   ledger.json   账本（唯一事实来源，含版本图）
   bible/*.md    人物圣经
   beats_双线夜戏.json  双线场景节拍示例（stage 写成 {角色:文字}）
+  scene_大乱斗.json    大乱斗场景：地点图 / 初始位置 / 物品 / schedule
 tests/          请求层 / 工作台 / 剧场验收（不联网）
 runs/           产物（自动生成，已 gitignore）
 ```
@@ -230,6 +235,8 @@ runs/           产物（自动生成，已 gitignore）
 | 区块 | 内容 |
 | --- | --- |
 | **快照图 · 分支与指针** | 分支线、紫色虚线=读档分叉、绿框=当前指针、彩色方块=各角色的槽位 |
+| **位置与状态** | 谁在哪、状态如何、手里有什么、同地点有谁（机械判定用的就是这些） |
+| **唤醒时间线** | 谁在什么时刻被叫醒、为什么（开场/到点/某人行动/兜底） |
 | **各角色的上下文（并排）** | 每个角色一份只追加的上下文，颜色区分"世界事件/他的行动/只他知道/记忆覆盖层/状态注入" |
 | **信念 vs 事实** | 谁看得见哪些事件、盲区是什么；两个角色的盲区不同，隔离才是真的 |
 | **客观事件日志** | 事实，带在场者 |

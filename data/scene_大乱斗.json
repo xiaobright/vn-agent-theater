@@ -1,0 +1,27 @@
+{
+  "world_date": "第三天·夜",
+  "clock": 0,
+  "schedule": [
+    [0, "第三天·夜"],
+    [120, "第三天·深夜"],
+    [360, "第四天·清晨"],
+    [720, "第四天·正午"]
+  ],
+  "seed": "全员存取档·大乱斗·第一局",
+  "locations": {
+    "住处": { "label": "主角的住处", "neighbors": ["巷口"] },
+    "巷口": { "label": "窄巷口", "neighbors": ["住处", "码头", "据点"] },
+    "码头": { "label": "旧码头", "neighbors": ["巷口", "灯塔"] },
+    "灯塔": { "label": "灯塔下", "neighbors": ["码头"] },
+    "据点": { "label": "首领的据点", "neighbors": ["巷口"] }
+  },
+  "characters": {
+    "主角": { "location": "住处", "condition": "ok", "inventory": [] },
+    "首领": { "location": "据点", "condition": "ok", "inventory": ["短刀"] }
+  },
+  "items": {
+    "灯油": "码头",
+    "撬棍": "灯塔",
+    "止血药": "住处"
+  }
+}

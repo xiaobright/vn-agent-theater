@@ -5,6 +5,7 @@ from copy import deepcopy
 from dataclasses import asdict, is_dataclass, replace
 from datetime import datetime
 from functools import lru_cache
+import json
 from pathlib import Path
 import threading
 
@@ -22,6 +23,8 @@ from .recorder import Recorder
 from .rules import load_rules
 from .theater.actor import belief_matrix
 from .theater.director import beats_for, run_scene
+from .theater.physics import Scene
+from .theater.timeline import Timeline
 from .theater.world import World
 from .workspace import ConflictError, Workspace
 
@@ -52,9 +55,12 @@ class TheaterRequest(BaseModel):
     reasoning: str | None = Field(default=None, max_length=30)
     mock: bool = True
     turns: int = Field(default=4, ge=1, le=20)
+    max_turns: int = Field(default=10, ge=1, le=60)
     cast: list[str] = Field(default_factory=lambda: ["主角", "首领"])
     world_date: str = Field(default="第三天·夜", max_length=60)
     observe: bool = True
+    mode: str = Field(default="timeline", max_length=20)      # timeline | beats
+    scenario: str | None = Field(default=None, max_length=200)  # data/ 下的场景文件名
 
 
 class TheaterState:
@@ -73,6 +79,7 @@ class TheaterState:
                 "discarded": [], "belief": None, "contexts": {}, "objective": [],
                 "observer": [], "issues": [], "ops": [], "paused": None, "prose": "",
                 "run_dir": None, "calls": 0, "error": None, "events": [],
+                "wakes": [], "mode": "timeline", "world_date": "",
             }
             self.cancel_event = threading.Event()
 
@@ -104,12 +111,26 @@ def _theater_run(state: TheaterState, req: TheaterRequest) -> None:
         check_cancelled(cfg)
         request = (req.request or DEFAULT_REQUEST).strip()
         cast = [n for n in req.cast if n.strip()] or ["主角", "首领"]
-        world = World(req.world_date, cast)
+        timeline = None
+        world_date = req.world_date
+        if req.mode == "timeline":
+            path = DATA_DIR / (req.scenario or "scene_大乱斗.json")
+            if not path.resolve().is_relative_to(DATA_DIR.resolve()) or not path.exists():
+                raise ValueError("找不到场景文件（只允许 data/ 下的文件）")
+            data = json.loads(path.read_text(encoding="utf-8"))
+            cast = [n for n in (data.get("characters") or {}).keys()] or cast
+            scene = Scene.from_dict(data, cast)
+            world_date = data.get("world_date", world_date)
+            world = World(world_date, cast, scene, clock=int(data.get("clock", 0)))
+            timeline = Timeline(schedule=[tuple(x) for x in data.get("schedule", [[0, "起点"]])])
+        else:
+            world = World(world_date, cast)
         run_dir = RUNS_DIR / (datetime.now().strftime("%Y%m%d_%H%M%S_%f") + "_theater")
         rec = Recorder(run_dir)
         with state.lock:
             state.payload.update(provider=cfg.describe(), run_dir=str(run_dir), characters=cast,
-                                 request=request, turns=req.turns)
+                                 request=request, turns=req.turns, mode=req.mode,
+                                 world_date=world_date)
             state.payload.update(_theater_snapshot(world))
 
         def on_event(kind: str, payload=None) -> None:
@@ -121,8 +142,8 @@ def _theater_run(state: TheaterState, req: TheaterRequest) -> None:
                 state.payload.update(_theater_snapshot(world))
 
         result = run_scene(cfg, rec, world, request=request, rules=load_rules(),
-                           bibles=load_bibles(),
-                           beats=beats_for(world, req.turns, cast, req.world_date),
+                           bibles=load_bibles(), timeline=timeline, max_turns=req.max_turns,
+                           beats=(None if timeline else beats_for(world, req.turns, cast, world_date)),
                            observe=req.observe, on_event=on_event)
         check_cancelled(cfg)
         rec.write_text("prose.md", result["prose"])
@@ -132,6 +153,7 @@ def _theater_run(state: TheaterState, req: TheaterRequest) -> None:
             state.payload.update(status="done", prose=result["prose"], played=result["played"],
                                  paused=result["paused"], issues=result["issues"],
                                  ops=result["interface_ops"], observer=result["observer_reports"],
+                                 wakes=result.get("wakes", []), mode=result.get("mode", "beats"),
                                  calls=rec.seq)
     except Exception as exc:
         status = "cancelled" if isinstance(exc, LLMCancelled) or state.cancel_event.is_set() else "error"

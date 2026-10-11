@@ -119,6 +119,12 @@ def parse_object(text: str) -> dict:
     return value
 
 
+def hard_evidence(structural: list[dict]) -> list[dict]:
+    """只有**泄漏**是硬证据。非法动作是玩法失误，调用失败是基础设施问题，
+    都不该让观察者替作者按下暂停——那两类记进报告由人看。"""
+    return [i for i in structural if i.get("kind") == "leak"]
+
+
 def validate_report(value: dict, structural: list[dict]) -> dict:
     status = value.get("status")
     if status not in {"ok", "pause"}:
@@ -130,8 +136,8 @@ def validate_report(value: dict, structural: list[dict]) -> dict:
     if not isinstance(reason, str):
         raise ValueError("reason 必须是文字")
     # 结构层命中泄漏时不允许"一切正常"——硬证据优先于模型意见。
-    if structural and status == "ok":
+    if hard_evidence(structural) and status == "ok":
         status = "pause"
-        reason = (reason + " 结构层发现硬证据，已强制暂停。").strip()
+        reason = (reason + " 结构层发现泄漏硬证据，已强制暂停。").strip()
     return {"status": status, "divergences": divergences, "reason": reason,
             "structural": structural}

@@ -26,7 +26,58 @@ _OP_PATTERNS = (
     ("delete", re.compile(r"删槽\s*([123])")),
     ("note", re.compile(r"备注\s*[:：]\s*(.+)")),
 )
-_FIELD = re.compile(r"【(行动|内心|界面)】\s*([\s\S]*?)(?=\n?【(?:行动|内心|界面)】|$)")
+_FIELD = re.compile(
+    r"【(行动|内心|动作|界面|下次)】\s*([\s\S]*?)(?=\n?【(?:行动|内心|动作|界面|下次)】|$)")
+
+# 数值层动作。只认这几样——只有这几样能被机械裁决，其余一律交给叙述。
+_ACTION_PATTERNS = (
+    ("move", re.compile(r"移动\s*[：:]?\s*(\S+)")),
+    ("attack", re.compile(r"攻击\s*[：:]?\s*(\S+)")),
+    ("restrain", re.compile(r"制服\s*[：:]?\s*(\S+)")),
+    ("observe", re.compile(r"观察\s*[：:]?\s*(\S+)")),
+    ("take", re.compile(r"拿\s*[：:]?\s*(\S+)")),
+    ("use", re.compile(r"用\s*[：:]?\s*(\S+)")),
+)
+# 下次唤醒条件：角色自己决定什么时候再动，导演只负责排序。
+_NEXT_TIMER = re.compile(r"定时\s*[：:]?\s*(\d+)\s*(?:分钟|min)?")
+_NEXT_OBSERVE = re.compile(r"观察\s*[：:]?\s*(\S+)")
+_NONE_WORDS = {"无", "（无）", "-", "none", "None", "不动", "不说话"}
+
+
+def parse_action(text: str) -> dict | None:
+    """把【动作】解析成数值层动作。解析不出来返回 None（这一轮就只是说话）。"""
+    clean = (text or "").strip()
+    if not clean or clean in _NONE_WORDS:
+        return None
+    for op, pattern in _ACTION_PATTERNS:
+        match = pattern.search(clean)
+        if not match:
+            continue
+        value = match.group(1).strip("。，,、 「」【】")
+        if not value:
+            continue
+        if op == "move":
+            return {"op": "move", "dest": value}
+        if op in ("take", "use"):
+            return {"op": op, "item": value}
+        return {"op": op, "target": value}
+    return None
+
+
+def parse_next(text: str, *, default_minutes: int = 60) -> dict:
+    """把【下次】解析成唤醒条件。解析不出来就给兜底定时——**绝不能没有下一步**。"""
+    clean = (text or "").strip()
+    if clean in {"立刻", "现在", "立即"}:
+        return {"kind": "immediate", "after_minutes": 0, "note": "立刻"}
+    match = _NEXT_TIMER.search(clean)
+    if match:
+        return {"kind": "timer", "after_minutes": int(match.group(1)), "note": clean[:60]}
+    match = _NEXT_OBSERVE.search(clean)
+    if match:
+        return {"kind": "observe", "target": match.group(1).strip("。，,、 「」"),
+                "after_minutes": 0, "note": clean[:60]}
+    return {"kind": "timer", "after_minutes": default_minutes,
+            "note": f"（未声明下一步，默认 {default_minutes} 分钟后）"}
 
 
 def actor_prompt(name: str, bible: str, rules: str) -> str:
@@ -57,7 +108,10 @@ def parse_reply(text: str) -> dict:
         else:
             op = {"op": "unknown", "raw": interface.strip()}
     return {"action": action.strip(), "inner": fields.get("内心", "").strip(),
-            "interface_raw": interface.strip(), "op": op}
+            "interface_raw": interface.strip(), "op": op,
+            "action_spec": parse_action(fields.get("动作", "")),
+            "action_raw": fields.get("动作", "").strip(),
+            "next": parse_next(fields.get("下次", ""))}
 
 
 def take_turn(cfg: Config, rec: Recorder, world: World, name: str, system_prompt: str,
@@ -137,5 +191,5 @@ def dump_matrix(matrix: dict) -> str:
     return json.dumps(matrix, ensure_ascii=False, indent=2)
 
 
-__all__ = ["actor_prompt", "parse_reply", "take_turn", "apply_interface", "mock_reply",
-           "belief_matrix", "dump_matrix", "SLOT_COUNT"]
+__all__ = ["actor_prompt", "parse_reply", "parse_action", "parse_next", "take_turn",
+           "apply_interface", "mock_reply", "belief_matrix", "dump_matrix", "SLOT_COUNT"]
