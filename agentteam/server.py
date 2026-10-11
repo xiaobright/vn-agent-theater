@@ -16,9 +16,13 @@ from . import pipeline
 from .config import DATA_DIR, PROVIDER_PRESETS, RUNS_DIR, load_config
 from .ledger import Ledger, ProposalError
 from .llm import LLMCancelled, check_cancelled, scheduler_snapshot
-from .main import DEFAULT_REQUEST
+from .main import DEFAULT_REQUEST, load_bibles
 from .pipeline import MODE_LABELS, MODES
 from .recorder import Recorder
+from .rules import load_rules
+from .theater.actor import belief_matrix
+from .theater.director import beats_for, run_scene
+from .theater.world import World
 from .workspace import ConflictError, Workspace
 
 WEB_DIR = Path(__file__).resolve().parent / "web"
@@ -40,6 +44,101 @@ class RunRequest(BaseModel):
 class EditRequest(BaseModel):
     scene: str = Field(min_length=1, max_length=150000)
     proposal: dict
+
+
+class TheaterRequest(BaseModel):
+    request: str | None = Field(default=None, max_length=30000)
+    provider: str | None = Field(default=None, max_length=80)
+    reasoning: str | None = Field(default=None, max_length=30)
+    mock: bool = True
+    turns: int = Field(default=4, ge=1, le=20)
+    cast: list[str] = Field(default_factory=lambda: ["主角", "首领"])
+    world_date: str = Field(default="第三天·夜", max_length=60)
+    observe: bool = True
+
+
+class TheaterState:
+    """角色剧场的观察状态：每个角色一份上下文，加一条客观日志。"""
+
+    def __init__(self):
+        self.lock = threading.RLock()
+        self.cancel_event = threading.Event()
+        self.reset()
+
+    def reset(self):
+        with self.lock:
+            self.payload = {
+                "status": "idle", "provider": "", "request": "", "turns": 0, "played": 0,
+                "live": None, "graph": None, "characters": [], "state": None, "history": [],
+                "discarded": [], "belief": None, "contexts": {}, "objective": [],
+                "observer": [], "issues": [], "ops": [], "paused": None, "prose": "",
+                "run_dir": None, "calls": 0, "error": None, "events": [],
+            }
+            self.cancel_event = threading.Event()
+
+
+def _theater_snapshot(world: World) -> dict:
+    """把整个世界摊成可画的东西：图、状态、每个角色的上下文、信念差分。"""
+    return {
+        "live": {"branch": world.live[0], "turn": world.live[1], "world_date": world.world_date},
+        "graph": world.snapshot_graph(),
+        "state": world.character_state(),
+        "history": world.history(),
+        "discarded": world.discarded(),
+        "belief": belief_matrix(world),
+        "contexts": {n: world.turn_blocks(n) for n in world.characters},
+        "objective": [
+            {"turn": e.turn, "kind": e.kind, "actor": e.actor, "public": e.public,
+             "private": e.private, "world_date": e.world_date, "present": list(e.present),
+             "to": e.to}
+            for e in world.path_events()
+        ],
+    }
+
+
+def _theater_run(state: TheaterState, req: TheaterRequest) -> None:
+    rec = None
+    try:
+        cfg = load_config(mock=req.mock, provider=req.provider, reasoning=req.reasoning)
+        cfg = replace(cfg, cancel_event=state.cancel_event)
+        check_cancelled(cfg)
+        request = (req.request or DEFAULT_REQUEST).strip()
+        cast = [n for n in req.cast if n.strip()] or ["主角", "首领"]
+        world = World(req.world_date, cast)
+        run_dir = RUNS_DIR / (datetime.now().strftime("%Y%m%d_%H%M%S_%f") + "_theater")
+        rec = Recorder(run_dir)
+        with state.lock:
+            state.payload.update(provider=cfg.describe(), run_dir=str(run_dir), characters=cast,
+                                 request=request, turns=req.turns)
+            state.payload.update(_theater_snapshot(world))
+
+        def on_event(kind: str, payload=None) -> None:
+            with state.lock:
+                state.payload["events"].append({"kind": kind, "payload": _plain(payload)})
+                state.payload["events"] = state.payload["events"][-120:]
+                if kind in {"observer", "pause", "leak", "rewind", "op", "turn_ended"}:
+                    state.payload["events"][-1]["highlight"] = True
+                state.payload.update(_theater_snapshot(world))
+
+        result = run_scene(cfg, rec, world, request=request, rules=load_rules(),
+                           bibles=load_bibles(),
+                           beats=beats_for(world, req.turns, cast, req.world_date),
+                           observe=req.observe, on_event=on_event)
+        check_cancelled(cfg)
+        rec.write_text("prose.md", result["prose"])
+        rec.write_json("result.json", result)
+        with state.lock:
+            state.payload.update(_theater_snapshot(world))
+            state.payload.update(status="done", prose=result["prose"], played=result["played"],
+                                 paused=result["paused"], issues=result["issues"],
+                                 ops=result["interface_ops"], observer=result["observer_reports"],
+                                 calls=rec.seq)
+    except Exception as exc:
+        status = "cancelled" if isinstance(exc, LLMCancelled) or state.cancel_event.is_set() else "error"
+        with state.lock:
+            state.payload.update(status=status,
+                                 error="已取消本次运行" if status == "cancelled" else str(exc),
+                                 calls=rec.seq if rec else 0)
 
 
 class RunState:
@@ -184,6 +283,8 @@ def create_app(data_dir: Path = DATA_DIR, runs_dir: Path = RUNS_DIR, *, rules_lo
     app = FastAPI(title="全员存取档 · 创作工作台")
     state = RunState()
     app.state.run_state = state
+    theater = TheaterState()
+    app.state.theater_state = theater
 
     @lru_cache(maxsize=1)
     def workspace():
@@ -215,6 +316,45 @@ def create_app(data_dir: Path = DATA_DIR, runs_dir: Path = RUNS_DIR, *, rules_lo
     @app.get("/api/runs")
     def get_runs():
         return {"runs": workspace().list_runs()}
+
+    # ---------------- 角色剧场 ----------------
+
+    @app.get("/api/theater/state")
+    def theater_state():
+        with theater.lock:
+            payload = deepcopy(theater.payload)
+        payload.update(
+            providers=[{"name": k, "label": v["label"]} for k, v in PROVIDER_PRESETS.items()],
+            known_characters=list(Ledger(data_dir / "ledger.json").data["characters"].keys()),
+            force_mock=force_mock,
+        )
+        return payload
+
+    @app.post("/api/theater/run")
+    def theater_start(req: TheaterRequest):
+        if force_mock:
+            req = req.model_copy(update={"mock": True})
+        with theater.lock:
+            if theater.payload["status"] == "running":
+                return error_response(ConflictError("剧场里已经有一场戏在演了"))
+            if not req.cast:
+                return error_response(ValueError("至少要有一个角色"))
+            theater.reset()
+            theater.payload.update(status="running")
+            try:
+                threading.Thread(target=_theater_run, args=(theater, req), daemon=True).start()
+            except Exception:
+                theater.payload.update(status="error", error="无法启动后台任务")
+                return error_response(ConflictError("无法启动后台任务"))
+        return {"ok": True}
+
+    @app.post("/api/theater/cancel")
+    def theater_cancel():
+        with theater.lock:
+            if theater.payload["status"] != "running":
+                return error_response(ConflictError("剧场里没有正在演的戏"))
+            theater.cancel_event.set()
+        return {"ok": True}
 
     @app.get("/api/runs/{run_id}")
     def get_run(run_id: str):
@@ -286,4 +426,5 @@ def create_app(data_dir: Path = DATA_DIR, runs_dir: Path = RUNS_DIR, *, rules_lo
 
 app = create_app()
 STATE = app.state.run_state
+THEATER = app.state.theater_state
 

@@ -1,0 +1,78 @@
+"""上下文装配：静态系统提示 + 只追加的历史 + 每轮结尾的状态注入。
+
+硬约束（前缀缓存与回滚语义都靠它）：
+  1. 系统提示词一字不变，**不含任何随轮次变化的状态**。
+  2. 历史消息只追加，永不改写。每个事件渲染成恰好一条消息，不做合并/重排。
+  3. "现在的状态"作为**每轮结尾追加的一个尾块**注入，并且在写入时就被冻结成
+     一条 state 事件 —— 不能事后重算。
+
+第 3 条的理由值得写下来：状态块里含**三槽清单**，而三槽是 World 里唯一不随
+回溯回退的东西（R01.2）。所以"第 T 轮的状态块"不是 (live, branches) 的函数，
+事后重算会拿到当前的槽位而不是当时的槽位，前缀就不再逐字节一致，缓存失效、
+回滚语义也错。写一次、永不重写，两件事同时成立。
+
+于是有一条可直接断言的性质：
+    messages(T) 是 messages(T+1) 的**前缀**。
+"""
+from __future__ import annotations
+
+from .world import World
+
+# 每轮结尾注入的状态块。改这里就能改角色"开界面时能看到什么"的措辞。
+STATE_TEMPLATE = """【状态注入 · 第{turn}轮 · 世界日期：{world_date}】
+
+你的状态：{vitality}
+你的三槽（只有你自己看得到，也只看得到自己的）：
+{slots}"""
+
+
+def state_block(world: World, actor: str) -> str:
+    """此刻该角色掌握的状态。只含他自己的槽位——别人的存档列表谁都看不到（R06）。"""
+    lines = []
+    for index, slot in enumerate(world.slots(actor), start=1):
+        if slot is None:
+            lines.append(f"  槽{index}：（空）")
+        else:
+            lines.append(f"  槽{index}：{slot['world_date']} — 「{slot['note'] or '（无备注）'}」")
+    vitality = "存活，可操作。" if world.can_act(actor) else (
+        "已死亡。" if not world.alive(actor) else "存活，但世界正被他人暂停。")
+    return STATE_TEMPLATE.format(turn=world.live[1], world_date=world.world_date,
+                                 vitality=vitality, slots="\n".join(lines))
+
+
+def inject_state(world: World, actor: str) -> None:
+    """在**本轮结尾**为某个角色追加状态块。写入即冻结。"""
+    world.append("state", actor=actor, public=state_block(world, actor), to=actor)
+
+
+def inject_state_all(world: World) -> None:
+    """每轮结束时给每个角色各注入一份（各自只看到自己的）。"""
+    for name in world.characters:
+        inject_state(world, name)
+
+
+def build_messages(world: World, actor: str, system_prompt: str) -> list[dict]:
+    """这个角色此刻该看到的完整 messages。
+
+    渲染规则固定：自己的 turn 事件 = assistant，其余 = user；一个事件一条消息。
+    不合并连续同角色消息，否则字节布局会随上下文变化，前缀就不再稳定。
+    """
+    messages = [{"role": "system", "content": system_prompt}]
+    for event in world.view(actor):
+        role = "assistant" if event.kind == "turn" and event.actor == actor else "user"
+        messages.append({"role": role, "content": event.text_for(actor)})
+    return messages
+
+
+def prefix_len(a: list[dict], b: list[dict]) -> int:
+    """两个 messages 列表从头开始逐字节相同的消息条数。"""
+    n = 0
+    for x, y in zip(a, b):
+        if x != y:
+            break
+        n += 1
+    return n
+
+
+def is_prefix(earlier: list[dict], later: list[dict]) -> bool:
+    return prefix_len(earlier, later) == len(earlier) and len(earlier) <= len(later)

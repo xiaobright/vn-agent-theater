@@ -1,10 +1,15 @@
 """把一次创作跑成流水线，并支持多种"协作模式"，方便横向对比。
 
-模式：
-  team          总编 → 时间线主管 → 角色编剧（切片事实包·隔离）→ 主笔 → 审读
-  team_fullctx  同上，但角色编剧看到全量账本（故意关掉隔离，做对照）
-  single        一个智能体拿到全部资料，直接写稿（单 agent 基线）
-  groupchat     五个岗位在同一讨论串里依次发言，再由主笔成稿（群聊拓扑）
+模式（MODES）：
+  workshop            team 的流程 + 审查采纳闭环（状态提案 → 机制审查 → 有限修订）
+  team                总编 → 时间线主管 → 角色编剧（切片事实包·隔离）→ 主笔 → 审读
+  team_fullctx        同上，但角色编剧看到全量账本（故意关掉隔离，做对照）
+  single              一个智能体拿到全部资料，直接写稿（单 agent 基线）
+  groupchat           五个岗位在同一讨论串里依次发言，再由主笔成稿（群聊拓扑）
+  groupchat_guarded   群聊 + 规则守门（有否决权）→ 主笔只据批准清单写稿
+
+closed_loop=True 时，在成稿之后追加"状态提案 / 机制审查 / 修订复验"三个阶段；
+审查判 pass 才置 workflow_status=ready，供工作台采纳。compare.py 用 False。
 
 on_event(kind, payload) 是给调用方（网页/命令行）的进度回调：
   "stages"     payload = list[Stage]        —— 声明本次有哪些阶段
@@ -13,6 +18,9 @@ on_event(kind, payload) 是给调用方（网页/命令行）的进度回调：
   "char_start" payload = 角色名
   "char_done"  payload = (角色名, 文本)
   "speaker"    payload = 角色名             —— 群聊模式：轮到谁发言
+  "proposal"   payload = dict               —— 闭环：本场状态提案
+  "check"      payload = dict               —— 闭环：结构化审查结果
+  "revision"   payload = {"count", "scene"} —— 闭环：第 N 次定向修改后的正文
 """
 from __future__ import annotations
 
