@@ -26,9 +26,9 @@ DEFAULT_REQUEST = (
 )
 
 
-def load_bibles() -> dict[str, str]:
+def load_bibles(data_dir=DATA_DIR) -> dict[str, str]:
     bibles = {}
-    for p in (DATA_DIR / "bible").glob("*.md"):
+    for p in (data_dir / "bible").glob("*.md"):
         bibles[p.stem] = p.read_text(encoding="utf-8")
     return bibles
 

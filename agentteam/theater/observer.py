@@ -19,7 +19,7 @@ from __future__ import annotations
 import json
 import re
 
-from ..config import PROMPTS_DIR, Config
+from ..config import PROMPTS_DIR, Config, for_role
 from ..llm import chat, check_cancelled
 from ..recorder import Recorder
 from .actor import belief_matrix, dump_matrix
@@ -44,10 +44,13 @@ def secret_strings(world: World, actor: str) -> list[dict]:
     以及事件他看得见、但其中的 private 部分只属于当事人（别人的内心）。
     """
     secrets: list[dict] = []
+    remembered = world.view(actor)
+    known_ids = {e.event_id for e in remembered}
+    known_text = _normalize("\n".join(e.text_for(actor) for e in remembered))
     for event in world.path_events():
         owner = event.actor or event.to
         source = {"turn": event.turn, "kind": event.kind, "owner": owner}
-        if not event.visible_to(actor):
+        if event.event_id not in known_ids:
             candidates = (event.public, event.private)
         elif event.actor != actor and event.private:
             candidates = (event.private,)
@@ -55,13 +58,13 @@ def secret_strings(world: World, actor: str) -> list[dict]:
             candidates = ()
         for text in candidates:
             clean = _normalize(text)
-            if len(clean) >= MIN_SECRET_LEN:
+            if len(clean) >= MIN_SECRET_LEN and clean not in known_text:
                 secrets.append({**source, "text": clean})
     for name in world.characters:
         if name == actor:
             continue
         for slot in world.slots(name):
-            if slot and slot["note"] and len(_normalize(slot["note"])) >= MIN_SECRET_LEN:
+            if slot and slot["note"] and len(_normalize(slot["note"])) >= MIN_SECRET_LEN and _normalize(slot["note"]) not in known_text:
                 secrets.append({"turn": slot["turn"], "kind": "slot_note", "owner": name,
                                 "text": _normalize(slot["note"])})
     return secrets
@@ -80,11 +83,12 @@ def leak_check(world: World, actor: str, output: str) -> list[dict]:
 
 
 def observe(cfg: Config, rec: Recorder, world: World, request: str,
-            structural: list[dict], mock_text: str | None = None) -> dict:
+            structural: list[dict], mock_text: str | None = None, *, rules: str = "") -> dict:
     """语义层观察：分叉与暂停判据。输出结构化，供导演决定继续还是停。"""
     check_cancelled(cfg)
     card = (PROMPTS_DIR / "theater_observer.md").read_text(encoding="utf-8").strip()
     user = "\n".join([
+        "# 作者机制规则（不得当作角色已经知道的知识）\n" + rules,
         "# 本场目标\n" + request,
         "# 客观事件日志（事实，按轮次）\n" + json.dumps(
             [{"turn": e.turn, "kind": e.kind, "actor": e.actor, "public": e.public[:200],
@@ -97,6 +101,7 @@ def observe(cfg: Config, rec: Recorder, world: World, request: str,
         "# 当前世界状态\n" + json.dumps(world.character_state(), ensure_ascii=False, indent=2),
     ])
     messages = [{"role": "system", "content": card}, {"role": "user", "content": user}]
+    cfg = for_role(cfg, "continuity")
     text, usage, elapsed = chat(cfg, messages, max_tokens=max(cfg.max_output_tokens, OBSERVER_MAX_TOKENS),
                                 mock_text=mock_text or json.dumps(
                                     {"status": "ok", "divergences": [], "reason": "未发现机制违反。"},

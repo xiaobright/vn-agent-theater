@@ -186,9 +186,9 @@ def resolve(scene: Scene, state: State, action: dict, *, actor: str, clock: int,
 
     if op == "take":
         item = action.get("item") or ""
-        if item not in scene.items:
-            raise ActionError(f"没有这个物品：{item}")
-        if scene.items[item] != state.positions.get(actor):
+        if item not in state.items:
+            raise ActionError(f"当前没有可拾取的物品：{item}")
+        if state.items[item] != state.positions.get(actor):
             raise ActionError(f"{item} 不在这里")
         return {"ok": True, "public": f"{actor}拿起了{item}。",
                 "private": "", "meta": (("item", actor, item),)}

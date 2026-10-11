@@ -8,17 +8,14 @@
   R03    存档界面就是暂停界面；任何角色打开菜单的瞬间世界停住；
          暂停是私人的；不存在两人同时读档；暂停本身不改写世界
 
-因此 World 只有一件**非派生**状态：每个角色的三槽清单。其余全部是
-`(live, branches)` 的纯函数 —— 记忆、世界日期、生死、可操作资格都从
-只追加的事件日志推出来。于是"读档 = 全局回退 + 读档者豁免"只是移动一个
-指针并给读档者挂一段记忆覆盖层，不需要同步任何状态。
-
-推论（也是本模块的核心不变式，测试里会断言）：
-  除了 `_slots`，World 的任何可观察量都可以由 `(live, branches)` 重算出来。
+物理状态从事件日志重建；角色记忆有独立的分支基线。
+快照冻结到具体事件边界，包含时钟、各人记忆和待执行计划。
+存档库（包括备注）留在世界回退范围之外；轮次只用于展示。
 """
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
+from copy import deepcopy
 from typing import Iterable
 
 SLOT_COUNT = 3
@@ -31,8 +28,8 @@ SLOT_COUNT = 3
 #   pause      打开界面的暂停（只给他自己；R03：暂停是私人的）
 #   interface  存 / 读 / 删档的操作记录（只给他自己）
 #   state      每轮结尾注入的状态块（只给他自己）
-_KINDS = {"scene", "turn", "note", "memory", "pause", "interface", "state"}
-_PRIVATE_KINDS = {"memory", "pause", "interface", "state"}
+_KINDS = {"scene", "turn", "note", "memory", "pause", "interface", "state", "wake"}
+_PRIVATE_KINDS = {"memory", "pause", "interface", "state", "wake"}
 
 
 class TheaterError(RuntimeError):
@@ -54,6 +51,8 @@ class Event:
     # 数值层的状态变更，形如 ("position", 角色, 地点) / ("condition", 角色, 状态)
     # / ("item", 角色, 物品) / ("item", 角色, "-物品")。元组长度可变，所以用变长元组。
     meta: tuple[tuple[str, ...], ...] = ()
+    event_id: int = 0
+    clock: int = 0
 
     def __post_init__(self) -> None:
         if self.kind not in _KINDS:
@@ -96,6 +95,8 @@ class Branch:
     fork_turn: int
     events: list[Event] = field(default_factory=list)
     label: str = ""
+    fork_event_count: int = 0
+    memories: dict[str, tuple[Event, ...]] | None = None
 
     def tail_turn(self) -> int:
         return max((e.turn for e in self.events), default=self.fork_turn)
@@ -103,17 +104,21 @@ class Branch:
 
 @dataclass(frozen=True)
 class Slot:
-    """一份存档 = 一个世界快照指针。因为记忆由指针派生，(branch, turn) 就是全部世界状态。"""
+    """精确事件边界及独立记忆、调度快照；turn 是展示标签。"""
 
     index: int
     branch: str
     turn: int
     world_date: str
     note: str
+    event_count: int = 0
+    clock: int = 0
+    memories: tuple[tuple[str, tuple[Event, ...]], ...] = ()
+    schedule: dict | None = None
 
 
 class World:
-    """唯一的事实来源。除三槽外的一切都可从 (live, branches) 重算。
+    """世界事实、角色记忆与三槽资产的边界。
 
     `scene` 只提供数值层的**起点**（初始位置/状态/物品）；当前的位置、状态、物品
     同样是事件日志的函数——这条不变式不能破，否则回档会回不干净。
@@ -137,6 +142,8 @@ class World:
         self._state_cache: tuple | None = None
         self._slots: dict[str, list[Slot | None]] = {n: [None] * SLOT_COUNT for n in names}
         self._fork_seq = 0
+        self._event_seq = 0
+        self._timeline = None
         self._paused_by: str | None = None
         self._intents: dict[str, str] = {}
         self._discarded: list[dict] = []
@@ -200,10 +207,11 @@ class World:
         self._state_cache = (key, state)
         return state
 
-    def path_events(self, branch: str | None = None, turn: int | None = None) -> list[Event]:
+    def path_events(self, branch: str | None = None, turn: int | None = None,
+                    event_count: int | None = None) -> list[Event]:
         """把某条分支某轮之前（含）的全部事件按顺序摊平。
 
-        父分支只贡献到子分支 fork_turn 为止，所以被放弃的未来仍然留在父分支上，
+        父分支只贡献到子分支冻结的事件边界，所以被放弃的未来仍然留在父分支上，
         可以再被某个快照指回去（R01.4：读更晚的快照 = 分支切换）。
         """
         branch = branch or self._live_branch
@@ -216,15 +224,18 @@ class World:
         chain.reverse()
         events: list[Event] = []
         for i, b in enumerate(chain):
-            cap = turn if i == len(chain) - 1 else chain[i + 1].fork_turn
-            events.extend(e for e in b.events if e.turn <= cap)
+            cap = event_count if i == len(chain) - 1 else chain[i + 1].fork_event_count
+            events.extend(e for e in b.events[:cap] if e.turn <= turn)
         return events
 
     def view(self, actor: str) -> list[Event]:
         """这个角色此刻能看到/记得的全部事件。看不到的就不存在——隔离是结构性的。"""
         if actor not in self._slots:
             raise TheaterError(f"没有这个角色：{actor}")
-        return [e for e in self.path_events() if e.visible_to(actor)]
+        branch = self._branches[self._live_branch]
+        if branch.memories is None:
+            return [e for e in self.path_events() if e.visible_to(actor)]
+        return list(branch.memories[actor]) + [e for e in branch.events if e.visible_to(actor)]
 
     def turn_blocks(self, actor: str) -> list[dict]:
         """按轮次分组的可读上下文，供观察台并排展示各角色的记忆。"""
@@ -247,7 +258,8 @@ class World:
     def slots(self, name: str) -> list[dict | None]:
         return [None if s is None else
                 {"slot": s.index, "branch": s.branch, "turn": s.turn,
-                 "world_date": s.world_date, "note": s.note, "live": (s.branch, s.turn) == self.live}
+                 "world_date": s.world_date, "note": s.note, "event_count": s.event_count,
+                 "clock": s.clock, "live": (s.branch, s.turn) == self.live}
                 for s in self._slots[name]]
 
     def character_state(self) -> dict[str, dict]:
@@ -270,7 +282,8 @@ class World:
                      "world_date": self._live_date, "clock": self._clock},
             "branches": [
                 {"id": b.id, "parent": b.parent, "fork_turn": b.fork_turn,
-                 "tail_turn": b.tail_turn(), "label": b.label, "events": len(b.events)}
+                 "tail_turn": b.tail_turn(), "label": b.label, "events": len(b.events),
+                 "fork_event_count": b.fork_event_count}
                 for b in self._branches.values()
             ],
             "slots": {n: self.slots(n) for n in self._names},
@@ -307,8 +320,10 @@ class World:
             raise TheaterError(f"没有这个角色：{actor}")
         if kind == "turn" and actor is not None and not self.can_act(actor):
             raise TheaterError(f"{actor} 此刻不能行动（已死或世界被他人暂停）")
+        self._event_seq += 1
         event = Event(turn=self._live_turn, kind=kind, actor=actor, public=public, private=private,
-                      world_date=self._live_date, present=tuple(present), to=to, meta=tuple(meta))
+                      world_date=self._live_date, present=tuple(present), to=to, meta=tuple(meta),
+                      event_id=self._event_seq, clock=self._clock)
         self._branches[self._live_branch].events.append(event)
         return event
 
@@ -333,8 +348,8 @@ class World:
         """打开存取档菜单 = 世界停住。先到先得，不存在两人同时读档。"""
         if self._paused_by is not None:
             raise TheaterError(f"世界已被 {self._paused_by} 暂停；不存在两人同时读档")
-        if not self.alive(actor):
-            raise TheaterError(f"{actor} 已死，开不了界面")
+        if not self.can_act(actor):
+            raise TheaterError(f"{actor} 此刻无法主动操作界面")
         self._paused_by = actor
         self.append("pause", actor=actor, public="（你打开了存取档界面。世界停住了。）",
                     private="其他人感知不到世界停过。")
@@ -362,14 +377,18 @@ class World:
     def save(self, actor: str, slot: int, note: str = "") -> Slot:
         """把"现在"存进某个槽。注意：存档库不在回退边界内，所以它不会随读档倒退。"""
         self._check_slot_index(slot)
-        if not self.alive(actor):
-            raise TheaterError(f"{actor} 已死，存不了档")
-        entry = Slot(index=slot, branch=self._live_branch, turn=self._live_turn,
-                     world_date=self._live_date, note=note)
-        self._slots[actor][slot - 1] = entry
+        if not self.can_act(actor):
+            raise TheaterError(f"{actor} 此刻无法存档")
         self.append("interface", actor=actor,
                     public=f"（你把此刻存进槽{slot}。备注：{note or '（空）'}）",
                     meta=(("op", "save"), ("slot", str(slot))))
+        # 操作记录属于保存时刻；之后同轮发生的任何事都不属于这份快照。
+        entry = Slot(index=slot, branch=self._live_branch, turn=self._live_turn,
+                     world_date=self._live_date, note=note,
+                     event_count=len(self._branches[self._live_branch].events), clock=self._clock,
+                     memories=tuple((n, tuple(self.view(n))) for n in self._names),
+                     schedule=self._timeline.snapshot() if self._timeline else None)
+        self._slots[actor][slot - 1] = entry
         self._log("save", actor=actor, detail=f"存槽{slot}：{note or '（无备注）'}",
                   branch=entry.branch, turn=entry.turn)
         return entry
@@ -377,6 +396,8 @@ class World:
     def delete(self, actor: str, slot: int) -> None:
         """删档不可逆：回溯也拿不回来（R01.2 烧掉的档仍然烧掉）。"""
         self._check_slot_index(slot)
+        if not self.can_act(actor):
+            raise TheaterError(f"{actor} 此刻无法删档")
         if self._slots[actor][slot - 1] is None:
             raise TheaterError(f"槽{slot} 是空的")
         self._slots[actor][slot - 1] = None
@@ -393,37 +414,39 @@ class World:
         entry = self._slots[actor][slot - 1]
         if entry is None:
             raise TheaterError(f"槽{slot} 是空的，没有可读的档")
-        if not self.alive(actor):
+        if not self.can_act(actor):
             raise TheaterError(f"{actor} 已死，读不了档（R03：来不及反应就是真死）")
 
         target = (entry.branch, entry.turn)
         before = self.live
-        target_events = {id(e) for e in self.path_events(*target)}
-        # 读档者"读档前一刻的记忆"= 当前可见、但目标快照里没有的那些事。
-        overlay = [e.text_for(actor) for e in self.view(actor) if id(e) not in target_events]
+        current_memory = tuple(self.view(actor))
+        same_point = before == target and len(self._branches[target[0]].events) == entry.event_count
 
         self._live_branch, self._live_turn = target
         self._live_date = entry.world_date
+        self._clock = entry.clock
+        self._intents.clear()
+        if self._timeline is not None:
+            self._timeline.restore(entry.schedule)
 
         forked = None
-        if before != target:
+        if not same_point:
             self._fork_seq += 1
             forked = f"b{self._fork_seq}"
             self._branches[forked] = Branch(
                 forked, parent=target[0], fork_turn=target[1],
-                label=f"{actor} 读槽{slot}后的分支")
+                label=f"{actor} 读槽{slot}后的分支", fork_event_count=entry.event_count,
+                memories={**dict(entry.memories), actor: current_memory})
             self._live_branch = forked
-            if overlay:
-                self.append("memory", actor=actor,
-                            public="（你记得读档前发生的一切。）",
-                            private="\n".join(overlay))
+            self.append("memory", actor=actor, public="（你记得读档前发生的一切。）")
         self.append("interface", actor=actor,
                     public=f"（你读取了槽{slot}。世界回到 {entry.world_date}。）",
                     meta=(("op", "load"), ("slot", str(slot))))
         summary = {"actor": actor, "slot": slot, "from": {"branch": before[0], "turn": before[1]},
                    "to": {"branch": self._live_branch, "turn": self._live_turn,
                           "world_date": entry.world_date},
-                   "forked_branch": forked, "overlay_lines": len(overlay),
+                    "forked_branch": forked, "overlay_lines": len(current_memory),
+                    "clock": self._clock, "event_count": entry.event_count,
                    "others_reverted": [n for n in self._names if n != actor]}
         self._log("load", actor=actor,
                   detail=f"读槽{slot} → {entry.world_date}；{actor} 保留记忆，其他人回到快照",
@@ -433,12 +456,27 @@ class World:
     # ---------------- 备注 ----------------
 
     def note(self, actor: str, text: str, to: str | None = None) -> Event:
-        """备注 / 跨时间线留言：只进收件人的上下文（默认写给自己）。"""
+        """普通私有信息（可回退）；持久槽位留言请用 edit_note。"""
         recipient = to or actor
         if recipient not in self._slots:
             raise TheaterError(f"没有这个角色：{recipient}")
         self._log("note", actor=actor, detail=f"给 {recipient} 的备注：{text}")
         return self.append("note", actor=actor, public=f"备注：{text}", to=recipient)
+
+    def edit_note(self, actor: str, slot: int, text: str) -> None:
+        """只更新槽位上的文字，不覆盖快照；与槽位一起跨回溯保留。"""
+        self._check_slot_index(slot)
+        if not self.can_act(actor):
+            raise TheaterError(f"{actor} 此刻无法改备注")
+        entry = self._slots[actor][slot - 1]
+        if entry is None:
+            raise TheaterError(f"槽{slot} 是空的，不能改备注")
+        self._slots[actor][slot - 1] = replace(entry, note=text)
+        self.append("interface", actor=actor, public=f"（你把槽{slot}的备注改为：{text}）")
+        self._log("note", actor=actor, detail=f"改槽{slot}备注：{text}")
+
+    def bind_timeline(self, timeline) -> None:
+        self._timeline = timeline
 
     # ---------------- 内部 ----------------
 
@@ -482,8 +520,10 @@ class World:
         other._scene = copy.deepcopy(self._scene)
         other._clock = self._clock
         other._state_cache = None
-        other._slots = {n: [replace(s) if s else None for s in v] for n, v in self._slots.items()}
+        other._slots = deepcopy(self._slots)
         other._fork_seq = self._fork_seq
+        other._event_seq = self._event_seq
+        other._timeline = deepcopy(self._timeline)
         other._paused_by = self._paused_by
         other._intents = dict(self._intents)
         other._discarded = copy.deepcopy(self._discarded)

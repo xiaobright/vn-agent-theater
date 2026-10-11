@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
+from copy import deepcopy
 
 # 没人声明下一步时，兜底推进多少分钟
 DEFAULT_STEP = 60
@@ -57,6 +58,18 @@ class Timeline:
     pending: list[Wake] = field(default_factory=list)
     fired: list[dict] = field(default_factory=list)
     _seq: int = 0
+    last_action: dict[str, int] = field(default_factory=dict)
+
+    def snapshot(self) -> dict:
+        return deepcopy({"pending": self.pending, "last_action": self.last_action, "seq": self._seq})
+
+    def restore(self, snapshot: dict | None) -> None:
+        data = deepcopy(snapshot or {})
+        self.pending = data.get("pending", [])
+        self.last_action.clear()
+        self.last_action.update(data.get("last_action", {}))
+        # fired 是作者的执行审计；保留跨分支历史，调度只使用恢复后的 pending。
+        self._seq = max(self._seq, data.get("seq", 0))
 
     # ---------------- 世界时刻 ----------------
 

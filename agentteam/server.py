@@ -103,7 +103,8 @@ def _theater_snapshot(world: World) -> dict:
     }
 
 
-def _theater_run(state: TheaterState, req: TheaterRequest) -> None:
+def _theater_run(state: TheaterState, req: TheaterRequest, data_dir: Path = DATA_DIR,
+                 runs_dir: Path = RUNS_DIR, rules_loader=None) -> None:
     rec = None
     try:
         cfg = load_config(mock=req.mock, provider=req.provider, reasoning=req.reasoning)
@@ -114,10 +115,11 @@ def _theater_run(state: TheaterState, req: TheaterRequest) -> None:
         timeline = None
         world_date = req.world_date
         if req.mode == "timeline":
-            path = DATA_DIR / (req.scenario or "scene_大乱斗.json")
-            if not path.resolve().is_relative_to(DATA_DIR.resolve()) or not path.exists():
+            path = data_dir / (req.scenario or "scene_大乱斗.json")
+            if not path.resolve().is_relative_to(data_dir.resolve()) or not path.exists():
                 raise ValueError("找不到场景文件（只允许 data/ 下的文件）")
             data = json.loads(path.read_text(encoding="utf-8"))
+            request = req.request or data.get("request") or request
             cast = [n for n in (data.get("characters") or {}).keys()] or cast
             scene = Scene.from_dict(data, cast)
             world_date = data.get("world_date", world_date)
@@ -125,7 +127,7 @@ def _theater_run(state: TheaterState, req: TheaterRequest) -> None:
             timeline = Timeline(schedule=[tuple(x) for x in data.get("schedule", [[0, "起点"]])])
         else:
             world = World(world_date, cast)
-        run_dir = RUNS_DIR / (datetime.now().strftime("%Y%m%d_%H%M%S_%f") + "_theater")
+        run_dir = runs_dir / (datetime.now().strftime("%Y%m%d_%H%M%S_%f") + "_theater")
         rec = Recorder(run_dir)
         with state.lock:
             state.payload.update(provider=cfg.describe(), run_dir=str(run_dir), characters=cast,
@@ -141,8 +143,13 @@ def _theater_run(state: TheaterState, req: TheaterRequest) -> None:
                     state.payload["events"][-1]["highlight"] = True
                 state.payload.update(_theater_snapshot(world))
 
-        result = run_scene(cfg, rec, world, request=request, rules=load_rules(),
-                           bibles=load_bibles(), timeline=timeline, max_turns=req.max_turns,
+        rules = rules_loader() if rules_loader else load_rules()
+        bibles = load_bibles(data_dir)
+        rec.write_json("inputs.json", {"request": request, "rules": rules, "bibles": bibles,
+                                       "scene": data if timeline else None, "cast": cast,
+                                       "world_date": world_date, "mode": req.mode})
+        result = run_scene(cfg, rec, world, request=request, rules=rules,
+                           bibles=bibles, timeline=timeline, max_turns=req.max_turns,
                            beats=(None if timeline else beats_for(world, req.turns, cast, world_date)),
                            observe=req.observe, on_event=on_event)
         check_cancelled(cfg)
@@ -354,6 +361,8 @@ def create_app(data_dir: Path = DATA_DIR, runs_dir: Path = RUNS_DIR, *, rules_lo
 
     @app.post("/api/theater/run")
     def theater_start(req: TheaterRequest):
+        if req.mode not in {"timeline", "beats"}:
+            return error_response(ValueError("未知剧场模式"))
         if force_mock:
             req = req.model_copy(update={"mock": True})
         with theater.lock:
@@ -364,7 +373,7 @@ def create_app(data_dir: Path = DATA_DIR, runs_dir: Path = RUNS_DIR, *, rules_lo
             theater.reset()
             theater.payload.update(status="running")
             try:
-                threading.Thread(target=_theater_run, args=(theater, req), daemon=True).start()
+                threading.Thread(target=_theater_run, args=(theater, req, data_dir, runs_dir, rules_loader), daemon=True).start()
             except Exception:
                 theater.payload.update(status="error", error="无法启动后台任务")
                 return error_response(ConflictError("无法启动后台任务"))

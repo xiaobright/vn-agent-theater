@@ -38,7 +38,7 @@ def main() -> None:
     ap.add_argument("--provider", default=None, help="stepfun（默认）或 longcat")
     ap.add_argument("--reasoning", default=None, help="推理档位 disabled/low/medium/high")
     ap.add_argument("--turns", type=int, default=4, help="跑几轮")
-    ap.add_argument("--cast", nargs="+", default=["主角", "首领"], help="出场角色")
+    ap.add_argument("--cast", nargs="+", default=None, help="出场角色；场景模式默认读取场景名单")
     ap.add_argument("--world-date", default="第三天·夜", help="起始世界日期")
     ap.add_argument("--beats", default=None,
                     help="场景节拍 JSON 文件：每项 {world_date, stage, cast}；"
@@ -64,8 +64,10 @@ def main() -> None:
     bibles = load_bibles()
     timeline = None
     scene = None
+    data = None
     if args.scene:
         data = json.loads(Path(args.scene).read_text(encoding="utf-8"))
+        request = args.request or data.get("request") or request
         cast = args.cast or list((data.get("characters") or {}).keys())
         scene = Scene.from_dict(data, cast)
         args.cast = cast
@@ -74,6 +76,7 @@ def main() -> None:
         timeline = Timeline(schedule=[tuple(x) for x in data.get("schedule", [[0, "起点"]])])
         args.world_date = data.get("world_date", args.world_date)
     else:
+        args.cast = args.cast or ["主角", "首领"]
         world = World(args.world_date, args.cast)
     if args.beats and timeline is None:
         beats = json.loads(Path(args.beats).read_text(encoding="utf-8"))
@@ -86,8 +89,11 @@ def main() -> None:
     else:
         beats = None
 
-    run_dir = RUNS_DIR / (datetime.now().strftime("%Y%m%d_%H%M%S") + "_theater")
+    run_dir = RUNS_DIR / (datetime.now().strftime("%Y%m%d_%H%M%S_%f") + "_theater")
     rec = Recorder(run_dir)
+    rec.write_json("inputs.json", {"request": request, "cast": args.cast, "beats": beats,
+                                   "scene": data, "rules": rules, "bibles": bibles,
+                                   "world_date": args.world_date, "injection": args.injection})
 
     print(f"模型：{cfg.describe()}")
     turns_label = f"最多 {args.max_turns} 轮" if timeline else f"{args.turns} 轮"
@@ -139,14 +145,13 @@ def main() -> None:
                        injection=args.injection, on_event=on_event)
 
     # ---- 落盘 ----
-    rec.write_json("inputs.json", {"request": request, "cast": args.cast, "beats": beats,
-                                   "scene_file": args.scene, "rules": rules, "bibles": bibles})
     rec.write_json("result.json", result)
     rec.write_text("prose.md", result["prose"])
     rec.write_json("log.json", [{"turn": e.turn, "kind": e.kind, "actor": e.actor,
                                  "public": e.public, "private": e.private,
                                  "world_date": e.world_date, "present": list(e.present),
-                                 "to": e.to} for e in world.path_events()])
+                                 "to": e.to, "event_id": e.event_id, "clock": e.clock,
+                                 "meta": e.meta} for e in world.path_events()])
     rec.write_json("belief.json", result["belief"])
     rec.write_json("graph.json", result["graph"])
     rec.write_text("contexts.md", _contexts_md(world))

@@ -25,8 +25,8 @@ from __future__ import annotations
 import json
 from typing import Callable
 
-from ..config import PROMPTS_DIR, Config
-from ..llm import LLMError, chat, check_cancelled
+from ..config import PROMPTS_DIR, Config, for_role
+from ..llm import LLMError, LLMCancelled, chat, check_cancelled
 from ..recorder import Recorder
 from . import actor as actor_mod
 from . import observer as observer_mod
@@ -58,9 +58,9 @@ def render_prose(cfg: Config, rec: Recorder, world: World, request: str,
     card = (PROMPTS_DIR / "theater_writer.md").read_text(encoding="utf-8").strip()
     log = []
     for event in world.path_events():
-        if event.kind in {"state", "interface"}:
+        if event.kind in {"state", "interface", "wake"}:
             continue
-        log.append({"turn": event.turn, "clock": world.clock, "world_date": event.world_date,
+        log.append({"turn": event.turn, "clock": event.clock, "world_date": event.world_date,
                     "kind": event.kind, "actor": event.actor, "public": event.public,
                     "present": list(event.present)})
     user = ("# 本场目标\n" + request
@@ -68,8 +68,11 @@ def render_prose(cfg: Config, rec: Recorder, world: World, request: str,
             + json.dumps(log, ensure_ascii=False, indent=2))
     messages = [{"role": "system", "content": card}, {"role": "user", "content": user}]
     fallback = "\n\n".join(f"【第{e['turn']}轮 · {e['world_date']}】{e['public']}" for e in log)
+    cfg = for_role(cfg, "writer")
     try:
         text, usage, elapsed = chat(cfg, messages, mock_text=mock_text or fallback)
+    except LLMCancelled:
+        raise
     except LLMError as exc:
         # 渲染失败不该让整场作废：事件日志是事实，直接交日志，标出来。
         # 这一笔也要落盘，否则产物里看不出"写手其实失败了"，会把降级稿当成正常稿。
@@ -121,19 +124,22 @@ def _actor_step(cfg: Config, rec: Recorder, world: World, name: str, prompt: str
     try:
         reply = actor_mod.take_turn(cfg, rec, world, name, prompt, mock_text,
                                     injection=injection)
+    except LLMCancelled:
+        raise
     except LLMError as exc:
         issues.append({"kind": "actor_failed", "actor": name, "message": str(exc)})
         emit("skip", {"actor": name, "reason": f"本轮调用失败：{exc}"})
         return None
     emit("actor", {"actor": name, "action": reply["action"], "inner": reply["inner"],
                    "action_raw": reply["action_raw"], "interface": reply["interface_raw"]})
+    # 先检查，再把新输出记入角色记忆，否则泄漏本身会被误当作早已知道。
+    hits = observer_mod.leak_check(world, name, reply["action"] + "\n" + reply["inner"])
     try:
         world.append("turn", actor=name, public=reply["action"], private=reply["inner"],
                      present=present)
     except TheaterError as exc:
         issues.append({"kind": "illegal_action", "actor": name, "message": str(exc)})
         return reply
-    hits = observer_mod.leak_check(world, name, reply["action"] + "\n" + reply["inner"])
     if hits:
         issues.extend(hits)
         emit("leak", {"actor": name, "hits": hits})
@@ -180,6 +186,11 @@ def run_scene(
         raise ValueError(f"未知注入方式：{injection}")
     prompts = {name: actor_mod.actor_prompt(name, bibles.get(name, ""), rules)
                for name in world.characters}
+    world.bind_timeline(timeline)
+    for name in world.characters:
+        initial = actor_mod.bible_sections(bibles.get(name, ""), {"性格", "存档习惯"})
+        if initial and not world.view(name):
+            world.append("note", actor=name, to=name, public="你目前的看法和习惯（会随经历改变）：\n" + initial)
     # system 模式下状态走系统提示词，历史里不再写 state 事件。
     inject = inject_state_all if injection == "trailing" else (lambda w: None)
     inject(world)
@@ -196,11 +207,14 @@ def run_scene(
         if not observe:
             return False
         try:
-            report = observer_mod.observe(cfg, rec, world, request, issues)
+            report = observer_mod.observe(cfg, rec, world, request, issues, rules=rules)
+        except LLMCancelled:
+            raise
         except (ValueError, json.JSONDecodeError, LLMError) as exc:
             # 观察者是**建议性**的：它这一轮答不上来，不该把整场戏弄崩。
-            report = {"status": "unknown", "divergences": [],
-                      "reason": f"观察者本轮未能给出结论：{exc}", "structural": []}
+            hard = observer_mod.hard_evidence(issues)
+            report = {"status": "pause" if hard else "unknown", "divergences": [],
+                      "reason": f"观察者本轮未能给出结论：{exc}", "structural": hard}
             emit("observer_error", {"message": str(exc)})
         reports.append(report)
         emit("observer", report)
@@ -211,6 +225,7 @@ def run_scene(
         beats = beats or default_beats(world)
         emit("start", {"characters": world.characters, "beats": len(beats), "mode": "beats"})
         for beat in beats:
+            check_cancelled(cfg)
             cast = [n for n in beat.get("cast", world.characters) if n in world.characters]
             world.advance(beat.get("world_date"))
             played += 1
@@ -240,14 +255,14 @@ def run_scene(
                     world.declare_intent(name, "本轮想行动")
                     emit("skip", {"actor": name, "reason": "世界正被他人暂停"})
                     continue
+                op_count = len(ops)
                 reply = _actor_step(cfg, rec, world, name, prompts[name], witnesses(name),
                                     _mock_scene_reply(world, name, played,
                                                       _mock_op(world, name, played)),
                                     injection, issues, ops, emit, {})
                 if reply is None:
                     continue
-                if any(o.get("op") == "load" and o.get("ok") for o in ops[-1:]):
-                    inject(world)
+                if any(o.get("op") == "load" and o.get("ok") for o in ops[op_count:]):
                     emit("rewind", ops[-1]["detail"])
                     rewound = True
                     break
@@ -264,9 +279,10 @@ def run_scene(
                        "horizon": timeline.horizon()})
         if not timeline.pending:
             timeline.seed([n for n in world.characters if world.alive(n)], clock=world.clock)
-        last_action: dict[str, int] = {}
+        last_action = timeline.last_action
         same_clock = 0
         for _ in range(max_turns):
+            check_cancelled(cfg)
             state = world.state()
             alive = state.living()
             if not alive:
@@ -304,16 +320,28 @@ def run_scene(
                 continue
             here = state.positions.get(name, "")
             present = tuple(state.at(here)) or (name,)
+            # 唤醒理由进入这个角色的私有上下文，其他人看不到他的计划。
+            world.append("wake", actor=name, to=name,
+                         public=f"【此刻 T+{when} 分钟 · {world.world_date}】你现在行动的原因："
+                                f"{reason['type']}，{reason.get('note', '')}")
             # 对方有没有正盯着我——没盯着就更可能得手（数值层用）
-            aware = {n: any(w.kind == "observe" and w.target == n and w.actor == m
-                            for w in timeline.pending for m in [w.actor])
+            aware = {n: any(w.kind == "observe" and w.target == name and w.actor == n
+                            for w in timeline.pending)
                      for n in world.characters}
+            op_count = len(ops)
             reply = _actor_step(cfg, rec, world, name, prompts[name], present,
                                 _mock_scene_reply(world, name, world.live[1],
                                                   _mock_op(world, name, world.live[1])),
                                 injection, issues, ops, emit, aware)
             if reply is None:
                 continue
+            rewound = any(o.get("op") == "load" and o.get("ok") for o in ops[op_count:])
+            if rewound:
+                same_clock = 0
+                emit("rewind", ops[-1]["detail"])
+                when = world.clock
+                if not timeline.pending:
+                    timeline.seed([n for n in world.characters if world.can_act(n)], clock=when)
             last_action[name] = when
             nxt = reply["next"]
             declared = timeline.declare(name, kind=nxt["kind"],

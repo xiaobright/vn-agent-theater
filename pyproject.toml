@@ -1,7 +1,9 @@
 [project]
-name = "agentteam"
-version = "0.2.0"
-description = "《全员存取档》智能体团队实验台（含网页观察台）"
+name = "vn-agent-theater"
+version = "0.3.0"
+description = "Local multi-agent narrative laboratory with event-driven character simulation"
+readme = "README.md"
+license = "MIT"
 requires-python = ">=3.11"
 dependencies = [
     "openai>=1.40",

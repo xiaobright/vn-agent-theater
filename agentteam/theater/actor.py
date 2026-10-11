@@ -24,7 +24,7 @@ _OP_PATTERNS = (
     ("save", re.compile(r"存槽\s*([123])\s*[:：]?\s*(.*)")),
     ("load", re.compile(r"读槽\s*([123])")),
     ("delete", re.compile(r"删槽\s*([123])")),
-    ("note", re.compile(r"备注\s*[:：]\s*(.+)")),
+    ("note", re.compile(r"(?:改)?备注\s*(?:槽)?\s*([123])\s*[:：]\s*(.*)")),
 )
 _FIELD = re.compile(
     r"【(行动|内心|动作|界面|下次)】\s*([\s\S]*?)(?=\n?【(?:行动|内心|动作|界面|下次)】|$)")
@@ -83,8 +83,20 @@ def parse_next(text: str, *, default_minutes: int = 60) -> dict:
 def actor_prompt(name: str, bible: str, rules: str) -> str:
     """这个角色的静态系统提示：一次构造，整场不变（前缀缓存的前提）。"""
     card = (PROMPTS_DIR / "theater_actor.md").read_text(encoding="utf-8").strip()
-    return (card.replace("{{name}}", name).replace("{{bible}}", bible or "（缺人物卡）")
-            + "\n\n# 你确知的机制（这是你自己会用的东西，不是别人的秘密）\n" + rules)
+    # 规则包属于作者和世界裁决层，不能作为演员的先验知识。
+    # 固定系统提示只留表达风格，初始信念进入可回退的记忆。
+    style = bible_sections(bible, {"口吻"})
+    return card.replace("{{name}}", name).replace("{{bible}}", style or "（未指定口吻）")
+
+
+def bible_sections(bible: str, headings: set[str]) -> str:
+    lines, keep = [], False
+    for line in bible.splitlines():
+        if line.startswith("## "):
+            keep = line[3:].strip() in headings
+        if keep:
+            lines.append(line)
+    return "\n".join(lines).strip()
 
 
 def parse_reply(text: str) -> dict:
@@ -101,7 +113,7 @@ def parse_reply(text: str) -> dict:
             if kind == "save":
                 op = {"op": "save", "slot": int(match.group(1)), "note": (match.group(2) or "").strip()}
             elif kind == "note":
-                op = {"op": "note", "text": match.group(1).strip()}
+                op = {"op": "note", "slot": int(match.group(1)), "text": match.group(2).strip()}
             else:
                 op = {"op": kind, "slot": int(match.group(1))}
             break
@@ -136,8 +148,8 @@ def apply_interface(world: World, name: str, op: dict | None) -> dict | None:
     """
     if not op or op.get("op") == "unknown":
         return None
-    world.open_interface(name)
     try:
+        world.open_interface(name)
         if op["op"] == "save":
             entry = world.save(name, op["slot"], op.get("note", ""))
             return {"actor": name, "op": "save", "slot": op["slot"], "ok": True,
@@ -150,8 +162,8 @@ def apply_interface(world: World, name: str, op: dict | None) -> dict | None:
             return {"actor": name, "op": "delete", "slot": op["slot"], "ok": True,
                     "detail": f"删槽{op['slot']}"}
         if op["op"] == "note":
-            world.note(name, op["text"])
-            return {"actor": name, "op": "note", "ok": True, "detail": op["text"][:60]}
+            world.edit_note(name, op["slot"], op["text"])
+            return {"actor": name, "op": "note", "slot": op["slot"], "ok": True, "detail": op["text"][:60]}
         return None
     except TheaterError as exc:
         return {"actor": name, "op": op.get("op"), "ok": False, "detail": str(exc)}
@@ -174,15 +186,18 @@ def mock_reply(turn: int, name: str, op: dict | None = None) -> str:
 def belief_matrix(world: World) -> dict:
     """信念 vs 事实：谁看得见哪些客观事件。给观察者和观察台用。"""
     objective = world.path_events()
-    ids = {id(e): i + 1 for i, e in enumerate(objective)}
+    ids = {e.event_id for e in objective}
     return {
         "objective": [
-            {"id": ids[id(e)], "turn": e.turn, "kind": e.kind, "actor": e.actor,
+            {"id": e.event_id, "turn": e.turn, "kind": e.kind, "actor": e.actor,
              "public": e.public[:120], "present": list(e.present)}
             for e in objective
         ],
-        "knows": {name: sorted(ids[id(e)] for e in world.view(name)) for name in world.characters},
-        "blind_spots": {name: sorted(set(ids.values()) - {ids[id(e)] for e in world.view(name)})
+        "knows": {name: sorted(ids & {e.event_id for e in world.view(name)}) for name in world.characters},
+        "remembered_other_branches": {
+            name: [{"id": e.event_id, "text": e.text_for(name)} for e in world.view(name) if e.event_id not in ids]
+            for name in world.characters},
+        "blind_spots": {name: sorted(ids - {e.event_id for e in world.view(name)})
                         for name in world.characters},
     }
 
